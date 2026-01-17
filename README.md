@@ -1,1 +1,3 @@
 # verso_pdf_export
+
+Python tool for exporting PDF files and associated metadata hosted on University of Idaho's VERSO institutional repository for web archiving purposes. The script utilizes the platform's API and searches for titles specified in CSV files placed in the root directory. PDF files are generated in the A folder, full metadata JSON and workflow logs are generated in the C folder and a refined set of human readable metadata is generated in a CSV file in the B folder. Script.py will run all functionalities, while md_script.py will generate only associated metadata. _Norm Lee and Andrew Weymouth, Winter 2026_.
