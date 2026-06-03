@@ -1,5 +1,6 @@
 """Tests for providers.openalex — reconstruct_abstract() and lookup_by_doi()."""
 
+import time
 from unittest.mock import patch
 
 import pytest
@@ -278,3 +279,84 @@ class TestLookupByDoi:
         assert result is None
         assert len(responses.calls) == 1
         assert any("daily credits" in msg.lower() for msg in caplog.messages)
+
+
+class TestCircuitBreaker:
+    """Tests for the module-wide circuit breaker that suspends requests
+    after repeated 429 failures to avoid burning API credits."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_circuit_breaker(self):
+        oa._consecutive_429s = 0
+        oa._suspended_until = 0.0
+
+    @responses.activate
+    @patch("time.sleep")
+    def test_circuit_trips_after_3_exhausted_retry_calls(
+        self, mock_sleep, session, sample_doi
+    ):
+        """After 3 calls each exhaust retries on 429, the 4th call returns
+        None immediately without making any HTTP request."""
+        # Each call makes 1 initial request + 3 retries = 4 requests.
+        # 3 calls × 4 requests = 12 responses, all 429.
+        for _ in range(12):
+            responses.add(responses.GET, _BASE_URL, status=429)
+        # A 13th response that should never be reached
+        responses.add(responses.GET, _BASE_URL, json=_VALID_RESPONSE_BODY, status=200)
+
+        # Each call exhausts 3 retries and returns None
+        for i in range(3):
+            result = lookup_by_doi(session, sample_doi, rate_interval=0.1)
+            assert result is None, f"Call {i + 1} should return None"
+
+        assert oa._consecutive_429s == 3
+        assert oa._suspended_until > 0.0
+
+        # 4th call should be blocked by circuit breaker — no HTTP request
+        result = lookup_by_doi(session, sample_doi, rate_interval=0.1)
+        assert result is None
+        assert len(responses.calls) == 12  # no additional request was made
+
+    @responses.activate
+    @patch("time.sleep")
+    def test_circuit_resets_after_cooldown_period(
+        self, mock_sleep, session, sample_doi
+    ):
+        """After the cooldown period elapses, requests resume normally
+        and a successful response resets the circuit breaker counter."""
+        oa._consecutive_429s = 3
+        oa._suspended_until = time.monotonic() - 1  # cooldown already expired
+
+        responses.add(responses.GET, _BASE_URL, json=_VALID_RESPONSE_BODY, status=200)
+
+        result = lookup_by_doi(session, sample_doi, rate_interval=0.1)
+
+        assert result == _EXPECTED_SHAPED
+        assert len(responses.calls) == 1
+        assert oa._consecutive_429s == 0
+        assert oa._suspended_until == 0.0
+
+    @pytest.mark.skip(reason="search_by_title not yet implemented — Step 4")
+    def test_circuit_is_module_wide_affects_search_by_title(self, session, sample_doi):
+        """When the circuit is open, search_by_title also returns None
+        immediately — the circuit breaker is module-wide, not per-function."""
+        from providers.openalex import search_by_title
+
+        oa._consecutive_429s = 3
+        oa._suspended_until = time.monotonic() + 300
+
+        result = search_by_title(session, "Some Title", rate_interval=0.1)
+        assert result is None
+
+    @responses.activate
+    @patch("time.sleep")
+    def test_successful_call_resets_counter(self, mock_sleep, session, sample_doi):
+        """A successful 200 response resets _consecutive_429s to 0,
+        preventing the circuit from tripping prematurely."""
+        oa._consecutive_429s = 2  # one failure away from tripping
+
+        responses.add(responses.GET, _BASE_URL, json=_VALID_RESPONSE_BODY, status=200)
+
+        result = lookup_by_doi(session, sample_doi, rate_interval=0.1)
+        assert result == _EXPECTED_SHAPED
+        assert oa._consecutive_429s == 0
