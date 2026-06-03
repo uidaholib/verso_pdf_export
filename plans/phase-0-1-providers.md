@@ -17,6 +17,11 @@ full TDD test suites.
 | Step granularity | One function per step for I/O functions | Keeps TDD cycles small and reviewable, despite shared retry infrastructure |
 | Provider logging | Modules only call `logging.getLogger(__name__)` — never configure handlers | Handler config belongs in the calling scripts; avoids duplicate handlers |
 | `conftest.py` session fixture | Real `requests.Session()` — the `responses` library intercepts at the adapter level | Keeps fixtures simple; no need to mock the session itself |
+| OpenAlex auth | `api_key=` query param (not `mailto=`) | Polite pool with `mailto=` deprecated Feb 2026; free API keys at openalex.org |
+| OpenAlex rate limits | Credit-based (1 credit/singleton, ~100/search, 100k daily free, 100 req/s cap) | Replaced flat "10 req/s polite pool" assumption per current API docs |
+| OpenAlex 403 vs 429 | 403 = per-second cap (retry), 429 = daily credits exhausted (check `X-RateLimit-Remaining`) | Both can indicate rate limiting but require different handling |
+| S2 batch endpoint | Deferred to later phase | Exists (`POST /paper/batch`, 500 DOIs/req) but adds complexity; individual calls fine for Phase 1 |
+| S2 `Retry-After` header | Honor if present, fallback backoff if absent | S2 docs don't confirm the header is always sent on 429 |
 
 ---
 
@@ -66,8 +71,11 @@ Installs cleanly, finds 0 tests.
 | 7 | Large realistic index (~50 words) | `reconstruct_abstract(index)` | Produces coherent sentence; regression guard |
 
 **Implement:** Create `providers/openalex.py` with:
-- Module-level constants: `OPENALEX_POLITE_EMAIL` (from env, default `""`),
-  `OPENALEX_RATE_INTERVAL` (from env, default `0.1`)
+- Module-level constants: `OPENALEX_API_KEY` (from env, required — free keys at
+  openalex.org; the `mailto=` polite pool was deprecated Feb 2026),
+  `OPENALEX_RATE_INTERVAL` (from env, default `0.1` — credit-based system:
+  singleton lookups = 1 credit, search = ~100 credits, 100k daily free credits,
+  hard cap 100 req/s)
 - `reconstruct_abstract(inverted_index: dict | None) -> str` — pure function, no I/O
 
 **Verify:** `pytest tests/test_openalex.py -v` — all green.
@@ -88,7 +96,9 @@ Installs cleanly, finds 0 tests.
 | 6 | API returns 500 then 200 | `lookup_by_doi(...)` | Returns result after retry (5xx triggers same retry as 429) |
 | 7 | API returns 429 three times | `lookup_by_doi(...)` | Returns `None`, logs warning |
 | 8 | Empty DOI `""` | `lookup_by_doi(s, "", 0)` | Returns `None` immediately, no HTTP call |
-| 9 | Polite email configured (env var set) | `lookup_by_doi(...)` | URL contains `mailto=...` param |
+| 9 | API key configured (env var set) | `lookup_by_doi(...)` | URL contains `api_key=...` param |
+| 13 | API returns 403 (per-second rate limit) then 200 | `lookup_by_doi(...)` | Retries, returns result |
+| 14 | API returns 429 with `X-RateLimit-Remaining: 0` | `lookup_by_doi(...)` | Does NOT retry (daily credits exhausted), logs warning |
 | 10 | `rate_interval` parameter | `lookup_by_doi(s, doi, 0.5)` | `time.sleep(0.5)` is called (mock `time.sleep`) |
 | 11 | `session.get()` raises `ConnectionError` | `lookup_by_doi(...)` | Returns `None`, logs warning |
 | 12 | `session.get()` raises `Timeout` | `lookup_by_doi(...)` | Returns `None`, logs warning |
@@ -96,10 +106,14 @@ Installs cleanly, finds 0 tests.
 **Implement:** Add `lookup_by_doi(session, doi, rate_interval) -> dict | None` to
 `providers/openalex.py`. Includes:
 - `GET https://api.openalex.org/works/doi:{doi}`
-- Retry up to 3 times on 429/5xx with exponential backoff (`time.sleep(3), time.sleep(15), time.sleep(30)`)
+- Retry up to 3 times on 429/403/5xx with exponential backoff (`time.sleep(3), time.sleep(15), time.sleep(30)`)
+- On 429: check `X-RateLimit-Remaining` header — if 0, daily credits are exhausted,
+  do NOT retry (return `None` immediately with a warning log)
+- On 403: per-second rate limit exceeded, retry normally
 - Returns `None` on 404 (no retry)
 - Returns `None` on network errors (`ConnectionError`, `Timeout`) after logging
 - Calls `time.sleep(rate_interval)` before each request
+- Sends `api_key=` query param on all requests (required since Feb 2026)
 - Circuit breaker globals (module-level): `_consecutive_429s`, `_suspended_until`.
   After 3 consecutive 429-skips, suspend OA calls for 300s.
 
@@ -144,7 +158,7 @@ cases. Add a `reset_openalex_circuit_breaker` fixture to `conftest.py` or use
 
 **Implement:** Add `search_by_title(session, title, rate_interval) -> dict | None`
 to `providers/openalex.py`.
-- `GET https://api.openalex.org/works?search={title}&per-page=1`
+- `GET https://api.openalex.org/works?search={title}&per_page=1`
 - Same retry/circuit-breaker logic as `lookup_by_doi`
 
 **Verify:** `pytest tests/test_openalex.py -v` — all green.
@@ -171,12 +185,17 @@ to `providers/openalex.py`.
 | 12 | `session.get()` raises `ConnectionError` | `lookup_by_doi(...)` | Returns `None`, logs warning |
 
 **Implement:** Create `providers/s2.py` with:
-- Module-level constants: `S2_API_KEY` (from env, default `""`),
+- Module-level constants: `S2_API_KEY` (from env, default `""` — optional; gives
+  guaranteed 1 req/s individual allocation vs shared unauthenticated pool),
   `S2_RATE_INTERVAL` (from env, default `1.0`)
 - `lookup_by_doi(session, doi, rate_interval) -> dict | None`
 - `GET https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}?fields=title,abstract,externalIds`
-- Retry up to 3 times on 429/5xx; honors `Retry-After` header when present
+- Retry up to 3 times on 429/5xx; honors `Retry-After` header if present
+  (not guaranteed by S2 docs — use fallback backoff when absent)
 - No circuit breaker (S2 doesn't have the same throttling pattern)
+
+**Note:** S2 offers a batch endpoint (`POST /graph/v1/paper/batch`, up to 500 DOIs)
+that would be more efficient for ~2,000 lookups. Deferred to a later optimization phase.
 
 **Verify:** `pytest tests/test_s2.py -v` — all green.
 
@@ -188,8 +207,8 @@ to `providers/openalex.py`.
 
 | # | Given | When | Then |
 |---|-------|------|------|
-| 1 | Match endpoint returns result with abstract | `match_by_title(s, "My Paper", 0)` | Returns shaped dict |
-| 2 | Match endpoint returns 404 (no match) | `match_by_title(...)` | Returns `None` |
+| 1 | Match endpoint returns result with abstract | `match_by_title(s, "My Paper", 0)` | Returns shaped dict (S2 response includes `matchScore`; can be logged for diagnostics) |
+| 2 | Match endpoint returns 404 (no match) | `match_by_title(...)` | Returns `None` (S2 returns 404 when no match found, not empty results) |
 | 3 | Empty title `""` | `match_by_title(s, "", 0)` | Returns `None` immediately |
 | 4 | 429 with `Retry-After`, then 200 | `match_by_title(...)` | Honors `Retry-After`, retries, returns result |
 | 5 | 500 then 200 | `match_by_title(...)` | Retries with same pattern |

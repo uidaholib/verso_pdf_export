@@ -99,15 +99,16 @@ responses>=0.23.0
 **Functions to implement:**
 - `reconstruct_abstract(inverted_index: dict | None) -> str` — converts OpenAlex inverted-index format to plain text. Pure function, no I/O.
 - `lookup_by_doi(session: requests.Session, doi: str, rate_interval: float) -> dict | None` — `GET https://api.openalex.org/works/doi:{doi}`. Returns `{"abstract", "matched_title", "external_id", "source": "openalex"}` or `None`.
-- `search_by_title(session: requests.Session, title: str, rate_interval: float) -> dict | None` — `GET https://api.openalex.org/works?search={title}&per-page=1`. Same return shape.
+- `search_by_title(session: requests.Session, title: str, rate_interval: float) -> dict | None` — `GET https://api.openalex.org/works?search={title}&per_page=1`. Same return shape.
 
 **Config** (module-level constants, loaded from env via `os.environ.get`):
-- `OPENALEX_POLITE_EMAIL` — optional, adds `mailto=` param for polite pool
-- `OPENALEX_RATE_INTERVAL` — default `0.1` (10 req/s polite pool)
+- `OPENALEX_API_KEY` — required, sent as `?api_key=` param (free keys at openalex.org; the `mailto=` polite pool was deprecated Feb 2026)
+- `OPENALEX_RATE_INTERVAL` — default `0.1` (credit-based system: singleton lookups = 1 credit, search = ~100 credits, daily free allowance = 100,000 credits, hard cap 100 req/s)
 
 **Error handling:**
 - Returns `None` on 404
 - Retries up to 3 times on 429/5xx with exponential backoff (`time.sleep(3), time.sleep(15), time.sleep(30)`)
+- Also retries on 403 (per-second rate limit) — distinguish from 429 (daily credits exhausted) by checking `X-RateLimit-Remaining` header; if 0, do not retry
 - Circuit breaker: after 3 consecutive 429-skips, suspend OA calls for 300s (module-level globals, matching universo pattern)
 - Logs warnings on retries and errors via `logging` module
 
@@ -129,7 +130,9 @@ responses>=0.23.0
 | Empty DOI `""` | `lookup_by_doi(s, "", 0.1)` | Returns `None` immediately, no HTTP call |
 | `search_by_title` returns results | `search_by_title(s, "My Paper", 0.1)` | Returns shaped dict |
 | `search_by_title` empty results | `search_by_title(...)` | Returns `None` |
-| Polite email configured | Any request | URL contains `mailto=...` |
+| API key configured | Any request | URL contains `api_key=...` param |
+| 403 (per-second rate limit) then 200 | `lookup_by_doi(...)` | Retries, returns result |
+| 429 with `X-RateLimit-Remaining: 0` | `lookup_by_doi(...)` | Does NOT retry (daily credits exhausted), logs warning |
 
 **Verify:** `pytest tests/test_openalex.py -v` — all green, no real HTTP calls.
 
@@ -146,10 +149,12 @@ responses>=0.23.0
 Return shape: `{"abstract", "matched_title", "external_id", "source": "semantic_scholar"}` or `None`.
 
 **Config:**
-- `S2_API_KEY` — optional, sent as `x-api-key` header (increases rate limits)
-- `S2_RATE_INTERVAL` — default `1.0` (1 req/s public pool)
+- `S2_API_KEY` — optional, sent as `x-api-key` header. Note: unauthenticated users share a 1,000 req/s pool; authenticated users get a guaranteed 1 req/s baseline per key (higher limits available on request). The key gives a stable individual allocation rather than competing in the shared pool.
+- `S2_RATE_INTERVAL` — default `1.0` (conservative; safe for both authenticated and unauthenticated use)
 
-**Error handling:** Same retry pattern as OpenAlex. Honors `Retry-After` header when present. No circuit breaker (S2 doesn't have the same throttling pattern).
+**Error handling:** Same retry pattern as OpenAlex (exponential backoff on 429/5xx). Honors `Retry-After` header if present (not guaranteed by S2 docs — use fallback backoff when absent). No circuit breaker (S2 doesn't have the same throttling pattern).
+
+**Future optimization:** S2 offers a batch endpoint (`POST /graph/v1/paper/batch`) that accepts up to 500 DOIs per request. For ~2,000 lookups this would be significantly more efficient. Consider for a later phase.
 
 **Test file:** `tests/test_s2.py`
 
@@ -162,7 +167,7 @@ Return shape: `{"abstract", "matched_title", "external_id", "source": "semantic_
 | 404 | `lookup_by_doi(...)` | Returns `None` |
 | 429 with Retry-After header, then 200 | `lookup_by_doi(...)` | Sleeps for Retry-After seconds, returns result |
 | 429 without Retry-After, then 200 | `lookup_by_doi(...)` | Uses fallback schedule |
-| `match_by_title` returns match | `match_by_title(...)` | Returns shaped dict |
+| `match_by_title` returns match | `match_by_title(...)` | Returns shaped dict (S2 provides `matchScore` in response; can be used alongside fuzzy title matching) |
 | API key present | Any request | `x-api-key` header included |
 | API key absent | Any request | No `x-api-key` header |
 | Empty DOI or title | Either function | Returns `None` immediately |
@@ -341,9 +346,9 @@ FUZZY_THRESHOLD = 90
 
 Add to the `.env` setup section:
 ```
-# Optional: for abstract harvesting (abstract_script.py and ENRICH_ABSTRACTS mode)
-OPENALEX_POLITE_EMAIL=your@email.edu    # optional, enables OpenAlex polite pool
-SEMANTIC_SCHOLAR_API_KEY=               # optional, increases S2 rate limit
+# For abstract harvesting (abstract_script.py and ENRICH_ABSTRACTS mode)
+OPENALEX_API_KEY=your-key-here          # required, free at openalex.org (mailto= polite pool deprecated Feb 2026)
+SEMANTIC_SCHOLAR_API_KEY=               # optional, gives guaranteed individual rate allocation
 ```
 
 Add run instructions for `abstract_script.py` and `import_abstracts.py`.
@@ -358,8 +363,8 @@ Add note about pymongo/bson namespace conflict.
 
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
-| `OPENALEX_POLITE_EMAIL` | No | `""` | Email for OpenAlex polite pool (faster rate limits) |
-| `SEMANTIC_SCHOLAR_API_KEY` | No | `""` | S2 API key (increases from 1 req/s to ~10 req/s) |
+| `OPENALEX_API_KEY` | Yes | `""` | API key for OpenAlex (free at openalex.org; `mailto=` polite pool deprecated Feb 2026) |
+| `SEMANTIC_SCHOLAR_API_KEY` | No | `""` | S2 API key (gives guaranteed 1 req/s individual allocation vs shared unauthenticated pool) |
 
 Existing `VERSO_API_KEY` unchanged. All loaded via `python-dotenv` (`load_dotenv()` at script startup).
 
