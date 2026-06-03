@@ -168,3 +168,83 @@ def lookup_by_doi(
         # Unexpected status
         logger.debug("OpenAlex unexpected status %d for DOI=%s", status, doi)
         return None
+
+
+def search_by_title(
+    session: requests.Session, title: str, rate_interval: float
+) -> dict | None:
+    """Search for a paper by title via the OpenAlex API.
+
+    Returns a shaped dict for the top result, or None if no match is found,
+    the result has no abstract, or an error occurs.
+    Retries on transient errors (429, 403, 5xx) with backoff.
+    """
+    if not title:
+        return None
+
+    # Circuit breaker check
+    if _suspended_until and time.monotonic() < _suspended_until:
+        return None
+
+    # Rate limiting
+    time.sleep(rate_interval)
+
+    url = "https://api.openalex.org/works"
+    params = {"api_key": OPENALEX_API_KEY, "search": title, "per_page": 1}
+
+    retries = 0
+    while True:
+        try:
+            resp = session.get(
+                url, params=params, headers={"Accept": "application/json"}
+            )
+        except requests.exceptions.ConnectionError:
+            logger.warning("OpenAlex connection error for title=%s", title)
+            return None
+        except requests.exceptions.Timeout:
+            logger.warning("OpenAlex timeout for title=%s", title)
+            return None
+
+        status = resp.status_code
+
+        if status == 200:
+            _reset_circuit()
+            results = resp.json().get("results", [])
+            if not results:
+                return None
+            return _shape(results[0])
+
+        if status == 404:
+            return None
+
+        if status == 429:
+            remaining = resp.headers.get("X-RateLimit-Remaining")
+            if remaining is not None and remaining == "0":
+                logger.warning("OpenAlex daily credits exhausted for title=%s", title)
+                return None
+
+        if status in (429, 403, 500, 502, 503, 504):
+            retries += 1
+            if retries > _MAX_RETRIES:
+                logger.warning(
+                    "OpenAlex %d retries exhausted (%d) for title=%s",
+                    status,
+                    retries,
+                    title,
+                )
+                if status == 429:
+                    _trip_circuit()
+                return None
+            logger.info(
+                "OpenAlex %d, retry %d/%d for title=%s",
+                status,
+                retries,
+                _MAX_RETRIES,
+                title,
+            )
+            time.sleep(_RETRY_429_SCHEDULE[retries - 1])
+            continue
+
+        # Unexpected status
+        logger.debug("OpenAlex unexpected status %d for title=%s", status, title)
+        return None

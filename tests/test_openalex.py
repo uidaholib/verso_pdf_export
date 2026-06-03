@@ -1,4 +1,4 @@
-"""Tests for providers.openalex — reconstruct_abstract() and lookup_by_doi()."""
+"""Tests for providers.openalex — reconstruct_abstract(), lookup_by_doi(), and search_by_title()."""
 
 import time
 from unittest.mock import patch
@@ -7,7 +7,7 @@ import pytest
 import responses
 
 import providers.openalex as oa
-from providers.openalex import lookup_by_doi, reconstruct_abstract
+from providers.openalex import lookup_by_doi, reconstruct_abstract, search_by_title
 
 
 class TestReconstructAbstract:
@@ -336,8 +336,8 @@ class TestCircuitBreaker:
         assert oa._consecutive_429s == 0
         assert oa._suspended_until == 0.0
 
-    @pytest.mark.skip(reason="search_by_title not yet implemented — Step 4")
-    def test_circuit_is_module_wide_affects_search_by_title(self, session, sample_doi):
+    @patch("time.sleep")
+    def test_circuit_is_module_wide_affects_search_by_title(self, mock_sleep, session):
         """When the circuit is open, search_by_title also returns None
         immediately — the circuit breaker is module-wide, not per-function."""
         from providers.openalex import search_by_title
@@ -360,3 +360,82 @@ class TestCircuitBreaker:
         result = lookup_by_doi(session, sample_doi, rate_interval=0.1)
         assert result == _EXPECTED_SHAPED
         assert oa._consecutive_429s == 0
+
+
+# --- Helpers for TestSearchByTitle ---
+
+_SEARCH_BASE_URL = "https://api.openalex.org/works"
+
+_SEARCH_RESPONSE_BODY = {"results": [_VALID_RESPONSE_BODY]}
+
+_SEARCH_EMPTY_RESPONSE = {"results": []}
+
+
+class TestSearchByTitle:
+    """Test matrix for search_by_title() — OpenAlex title search with retries."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_circuit_breaker(self):
+        oa._consecutive_429s = 0
+        oa._suspended_until = 0.0
+
+    @responses.activate
+    @patch("time.sleep")
+    def test_search_200_with_results_returns_shaped_dict(self, mock_sleep, session):
+        """200 with results containing abstract_inverted_index returns shaped dict."""
+        responses.add(
+            responses.GET, _SEARCH_BASE_URL, json=_SEARCH_RESPONSE_BODY, status=200
+        )
+        result = search_by_title(session, "My Paper", rate_interval=0)
+        assert result == _EXPECTED_SHAPED
+
+    @responses.activate
+    @patch("time.sleep")
+    def test_search_200_empty_results_returns_none(self, mock_sleep, session):
+        """200 with empty results list returns None."""
+        responses.add(
+            responses.GET, _SEARCH_BASE_URL, json=_SEARCH_EMPTY_RESPONSE, status=200
+        )
+        result = search_by_title(session, "Nonexistent Paper", rate_interval=0)
+        assert result is None
+
+    @responses.activate
+    @patch("time.sleep")
+    def test_search_429_then_200_retries_and_returns(self, mock_sleep, session):
+        """429 then 200 retries and returns the shaped dict."""
+        responses.add(responses.GET, _SEARCH_BASE_URL, status=429)
+        responses.add(
+            responses.GET, _SEARCH_BASE_URL, json=_SEARCH_RESPONSE_BODY, status=200
+        )
+        result = search_by_title(session, "My Paper", rate_interval=0)
+        assert result == _EXPECTED_SHAPED
+        sleep_calls = [c.args[0] for c in mock_sleep.call_args_list]
+        assert 3.0 in sleep_calls
+
+    @responses.activate
+    @patch("time.sleep")
+    def test_search_500_retries_with_same_pattern(self, mock_sleep, session):
+        """500 then 200 retries and returns the result."""
+        responses.add(responses.GET, _SEARCH_BASE_URL, status=500)
+        responses.add(
+            responses.GET, _SEARCH_BASE_URL, json=_SEARCH_RESPONSE_BODY, status=200
+        )
+        result = search_by_title(session, "My Paper", rate_interval=0)
+        assert result == _EXPECTED_SHAPED
+        assert len(responses.calls) == 2
+
+    @responses.activate
+    @patch("time.sleep")
+    def test_search_empty_title_returns_none_no_http(self, mock_sleep, session):
+        """Empty title returns None with no HTTP call."""
+        result = search_by_title(session, "", rate_interval=0)
+        assert result is None
+        assert len(responses.calls) == 0
+
+    @patch("time.sleep")
+    def test_search_circuit_breaker_open_returns_none(self, mock_sleep, session):
+        """When circuit breaker is open, returns None immediately."""
+        oa._consecutive_429s = 3
+        oa._suspended_until = time.monotonic() + 300
+        result = search_by_title(session, "My Paper", rate_interval=0)
+        assert result is None
