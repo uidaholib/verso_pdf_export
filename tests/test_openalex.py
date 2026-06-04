@@ -10,6 +10,13 @@ import providers.openalex as oa
 from providers.openalex import lookup_by_doi, reconstruct_abstract, search_by_title
 
 
+@pytest.fixture(autouse=True)
+def _reset_circuit_breaker():
+    """Reset OpenAlex circuit breaker state before every test in this module."""
+    oa._consecutive_429s = 0
+    oa._suspended_until = 0.0
+
+
 class TestReconstructAbstract:
     """Test matrix for converting OpenAlex inverted-index to plain text."""
 
@@ -93,11 +100,6 @@ _EXPECTED_SHAPED = {
 
 class TestLookupByDoi:
     """Test matrix for lookup_by_doi() — OpenAlex DOI lookup with retries."""
-
-    @pytest.fixture(autouse=True)
-    def _reset_circuit_breaker(self):
-        oa._consecutive_429s = 0
-        oa._suspended_until = 0.0
 
     @responses.activate
     @patch("time.sleep")
@@ -285,11 +287,6 @@ class TestCircuitBreaker:
     """Tests for the module-wide circuit breaker that suspends requests
     after repeated 429 failures to avoid burning API credits."""
 
-    @pytest.fixture(autouse=True)
-    def _reset_circuit_breaker(self):
-        oa._consecutive_429s = 0
-        oa._suspended_until = 0.0
-
     @responses.activate
     @patch("time.sleep")
     def test_circuit_trips_after_3_exhausted_retry_calls(
@@ -373,11 +370,6 @@ _SEARCH_EMPTY_RESPONSE = {"results": []}
 
 class TestSearchByTitle:
     """Test matrix for search_by_title() — OpenAlex title search with retries."""
-
-    @pytest.fixture(autouse=True)
-    def _reset_circuit_breaker(self):
-        oa._consecutive_429s = 0
-        oa._suspended_until = 0.0
 
     @responses.activate
     @patch("time.sleep")

@@ -76,6 +76,9 @@ def lookup_by_doi(
         except requests.exceptions.ConnectionError:
             logger.warning("S2 connection error for DOI=%s", doi)
             return None
+        except requests.exceptions.Timeout:
+            logger.warning("S2 timeout for DOI=%s", doi)
+            return None
 
         status = resp.status_code
 
@@ -147,6 +150,9 @@ def match_by_title(
             resp = session.get(url, params=params, headers=headers)
         except requests.exceptions.ConnectionError:
             logger.warning("S2 connection error for title=%r", title)
+            return None
+        except requests.exceptions.Timeout:
+            logger.warning("S2 timeout for title=%r", title)
             return None
 
         status = resp.status_code

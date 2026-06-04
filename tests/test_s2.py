@@ -180,6 +180,37 @@ class TestLookupByDoi:
         assert result is None
         assert any("connection error" in msg.lower() for msg in caplog.messages)
 
+    # 13. Timeout → returns None, logs warning
+    @patch("time.sleep")
+    def test_timeout_returns_none_logs_warning(
+        self, mock_sleep, session, sample_doi, caplog
+    ):
+        """Timeout returns None and logs a warning."""
+        import requests as req
+
+        with patch.object(
+            session, "get", side_effect=req.exceptions.Timeout("timed out")
+        ):
+            with caplog.at_level(logging.WARNING, logger="providers.s2"):
+                result = lookup_by_doi(session, sample_doi, rate_interval=0)
+        assert result is None
+        assert any("timeout" in msg.lower() for msg in caplog.messages)
+
+    # 14. 429 three times → returns None (exhausted retries)
+    @responses.activate
+    @patch("time.sleep")
+    def test_429_three_times_returns_none(
+        self, mock_sleep, session, sample_doi, caplog
+    ):
+        """Three consecutive 429s exhausts retries and returns None."""
+        responses.add(responses.GET, _BASE_URL, status=429)
+        responses.add(responses.GET, _BASE_URL, status=429)
+        responses.add(responses.GET, _BASE_URL, status=429)
+        with caplog.at_level(logging.WARNING, logger="providers.s2"):
+            result = lookup_by_doi(session, sample_doi, rate_interval=0)
+        assert result is None
+        assert any("retries exhausted" in msg.lower() for msg in caplog.messages)
+
 
 # --- match_by_title helpers ---
 
@@ -263,3 +294,43 @@ class TestMatchByTitle:
                 result = match_by_title(session, sample_title, rate_interval=0)
         assert result is None
         assert any("connection error" in msg.lower() for msg in caplog.messages)
+
+    # 7. Timeout → returns None, logs warning
+    @patch("time.sleep")
+    def test_timeout_returns_none_logs_warning(
+        self, mock_sleep, session, sample_title, caplog
+    ):
+        """Timeout returns None and logs a warning."""
+        import requests as req
+
+        with patch.object(
+            session, "get", side_effect=req.exceptions.Timeout("timed out")
+        ):
+            with caplog.at_level(logging.WARNING, logger="providers.s2"):
+                result = match_by_title(session, sample_title, rate_interval=0)
+        assert result is None
+        assert any("timeout" in msg.lower() for msg in caplog.messages)
+
+    # 8. rate_interval → time.sleep called
+    @responses.activate
+    @patch("time.sleep")
+    def test_rate_interval_sleep_called(self, mock_sleep, session, sample_title):
+        """Rate interval sleep is called with the given value."""
+        responses.add(responses.GET, _MATCH_URL, json=_MATCH_RESPONSE_BODY, status=200)
+        match_by_title(session, sample_title, rate_interval=1.0)
+        mock_sleep.assert_any_call(1.0)
+
+    # 9. 429 three times → returns None (exhausted retries)
+    @responses.activate
+    @patch("time.sleep")
+    def test_429_three_times_returns_none(
+        self, mock_sleep, session, sample_title, caplog
+    ):
+        """Three consecutive 429s exhausts retries and returns None."""
+        responses.add(responses.GET, _MATCH_URL, status=429)
+        responses.add(responses.GET, _MATCH_URL, status=429)
+        responses.add(responses.GET, _MATCH_URL, status=429)
+        with caplog.at_level(logging.WARNING, logger="providers.s2"):
+            result = match_by_title(session, sample_title, rate_interval=0)
+        assert result is None
+        assert any("retries exhausted" in msg.lower() for msg in caplog.messages)
