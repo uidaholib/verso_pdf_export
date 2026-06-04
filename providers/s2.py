@@ -1,7 +1,8 @@
 """Semantic Scholar API provider for abstract harvesting.
 
 Handles communication with the Semantic Scholar API
-(https://api.semanticscholar.org) to retrieve paper abstracts by DOI.
+(https://api.semanticscholar.org) to retrieve paper abstracts by DOI
+or title match.
 """
 
 import logging
@@ -115,4 +116,77 @@ def lookup_by_doi(
 
         # Unexpected status
         logger.debug("S2 unexpected status %d for DOI=%s", status, doi)
+        return None
+
+
+def match_by_title(
+    session: requests.Session, title: str, rate_interval: float
+) -> dict | None:
+    """Find a paper by title via the Semantic Scholar match endpoint.
+
+    The match endpoint returns a single best-matching paper (or 404 if no
+    match is found), unlike search endpoints that return result arrays.
+    Returns a shaped dict or None on failure.
+    """
+    if not title:
+        return None
+
+    # Rate limiting
+    time.sleep(rate_interval)
+
+    url = "https://api.semanticscholar.org/graph/v1/paper/search/match"
+    params = {"query": title, "fields": "title,abstract,externalIds"}
+
+    headers = {"Accept": "application/json"}
+    if S2_API_KEY:
+        headers["x-api-key"] = S2_API_KEY
+
+    retries = 0
+    while True:
+        try:
+            resp = session.get(url, params=params, headers=headers)
+        except requests.exceptions.ConnectionError:
+            logger.warning("S2 connection error for title=%r", title)
+            return None
+
+        status = resp.status_code
+
+        if status == 200:
+            data = resp.json()
+            match_score = data.get("matchScore")
+            logger.debug("S2 match for title=%r matchScore=%s", title, match_score)
+            return _shape(data)
+
+        if status == 404:
+            return None
+
+        if status in (429, 500, 502, 503, 504):
+            retries += 1
+            if retries > _MAX_RETRIES:
+                logger.warning(
+                    "S2 %d retries exhausted (%d) for title=%r",
+                    status,
+                    retries,
+                    title,
+                )
+                return None
+            logger.info(
+                "S2 %d, retry %d/%d for title=%r",
+                status,
+                retries,
+                _MAX_RETRIES,
+                title,
+            )
+            retry_after = resp.headers.get("Retry-After") if status == 429 else None
+            if retry_after is not None:
+                try:
+                    time.sleep(float(retry_after))
+                except ValueError:
+                    time.sleep(_RETRY_BACKOFF_SCHEDULE[retries - 1])
+            else:
+                time.sleep(_RETRY_BACKOFF_SCHEDULE[retries - 1])
+            continue
+
+        # Unexpected status
+        logger.debug("S2 unexpected status %d for title=%r", status, title)
         return None
