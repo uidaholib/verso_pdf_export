@@ -5,7 +5,12 @@ import logging
 
 import pytest
 
-from abstract_script import extract_identifiers, load_metadata, should_skip
+from abstract_script import (
+    enrich_records,
+    extract_identifiers,
+    load_metadata,
+    should_skip,
+)
 
 
 class TestLoadMetadata:
@@ -155,53 +160,312 @@ class TestShouldSkip:
 
     SKIP_TYPES = ["ETD-Doctoral", "ETD-Masters"]
 
-    def test_record_with_abstract_is_skipped(self):
-        """A record that already has a non-empty abstract should be skipped."""
+    def test_record_with_abstract_returns_skipped_existing(self):
+        """A record that already has a non-empty abstract returns the reason."""
         record = {"description.abstract": [{"value": "Some text"}]}
 
-        assert should_skip(record, self.SKIP_TYPES) is True
+        assert should_skip(record, self.SKIP_TYPES) == "skipped_existing_abstract"
 
-    def test_empty_abstract_list_is_not_skipped(self):
+    def test_empty_abstract_list_returns_none(self):
         """An empty abstract list means no abstract — don't skip."""
         record = {"description.abstract": [], "resourceType": "journal_article"}
 
-        assert should_skip(record, self.SKIP_TYPES) is False
+        assert should_skip(record, self.SKIP_TYPES) is None
 
-    def test_empty_value_string_is_not_skipped(self):
+    def test_empty_value_string_returns_none(self):
         """An abstract entry with an empty string value is not a real abstract."""
         record = {
             "description.abstract": [{"value": ""}],
             "resourceType": "journal_article",
         }
 
-        assert should_skip(record, self.SKIP_TYPES) is False
+        assert should_skip(record, self.SKIP_TYPES) is None
 
-    def test_missing_value_key_is_not_skipped(self):
+    def test_missing_value_key_returns_none(self):
         """An abstract entry without a 'value' key has no usable abstract."""
         record = {"description.abstract": [{}], "resourceType": "journal_article"}
 
-        assert should_skip(record, self.SKIP_TYPES) is False
+        assert should_skip(record, self.SKIP_TYPES) is None
 
-    def test_no_abstract_key_is_not_skipped(self):
+    def test_no_abstract_key_returns_none(self):
         """A record with no 'description.abstract' key at all is not skipped."""
         record = {"resourceType": "journal_article"}
 
-        assert should_skip(record, self.SKIP_TYPES) is False
+        assert should_skip(record, self.SKIP_TYPES) is None
 
-    def test_etd_doctoral_type_is_skipped(self):
-        """ETD-Doctoral is in skip_types, so it should be skipped."""
+    def test_etd_doctoral_returns_skipped_etd(self):
+        """ETD-Doctoral is in skip_types, so it returns the ETD skip reason."""
         record = {"resourceType": "ETD-Doctoral"}
 
-        assert should_skip(record, self.SKIP_TYPES) is True
+        assert should_skip(record, self.SKIP_TYPES) == "skipped_etd"
 
-    def test_etd_masters_type_is_skipped(self):
-        """ETD-Masters is in skip_types, so it should be skipped."""
+    def test_etd_masters_returns_skipped_etd(self):
+        """ETD-Masters is in skip_types, so it returns the ETD skip reason."""
         record = {"resourceType": "ETD-Masters"}
 
-        assert should_skip(record, self.SKIP_TYPES) is True
+        assert should_skip(record, self.SKIP_TYPES) == "skipped_etd"
 
-    def test_journal_article_without_abstract_is_not_skipped(self):
+    def test_journal_article_without_abstract_returns_none(self):
         """A journal_article with no abstract should not be skipped."""
         record = {"resourceType": "journal_article"}
 
-        assert should_skip(record, self.SKIP_TYPES) is False
+        assert should_skip(record, self.SKIP_TYPES) is None
+
+
+class TestEnrichRecords:
+    """Validate the main enrichment loop over a list of Esploro records."""
+
+    OA_RATE = 0.1
+    S2_RATE = 1.0
+    THRESHOLD = 90
+    SKIP_TYPES = ["ETD-Doctoral", "ETD-Masters"]
+
+    @staticmethod
+    def _make_record(
+        doi="10.1234/test", title="Test Paper", resource_type="journal_article"
+    ):
+        """Build a minimal Esploro-shaped record dict."""
+        return {
+            "originalRepository": {"assetId": "99999"},
+            "identifier.doi": doi,
+            "title": title,
+            "resourceType": resource_type,
+        }
+
+    def test_enriches_records_with_abstracts(self, session, monkeypatch):
+        """Provider returns abstracts for 2 of 3 records; third gets no_match."""
+        records = [
+            self._make_record(doi="10.1/a", title="Paper A"),
+            self._make_record(doi="10.1/b", title="Paper B"),
+            self._make_record(doi="10.1/c", title="Paper C"),
+        ]
+
+        call_count = 0
+
+        def mock_try_providers(sess, doi, title, oa_rate, s2_rate, threshold):
+            nonlocal call_count
+            call_count += 1
+            if doi in ("10.1/a", "10.1/b"):
+                return (
+                    {
+                        "abstract": f"Abstract for {doi}",
+                        "matched_title": title,
+                        "external_id": f"ext_{doi}",
+                        "source": "openalex",
+                    },
+                    "ok",
+                    [f"oa_doi={doi}"],
+                )
+            return (None, "no_match", ["oa_doi=miss", "s2_doi=miss"])
+
+        monkeypatch.setattr("abstract_script.try_providers", mock_try_providers)
+
+        results = enrich_records(
+            records,
+            session,
+            self.OA_RATE,
+            self.S2_RATE,
+            self.THRESHOLD,
+            self.SKIP_TYPES,
+        )
+
+        assert len(results) == 3
+        assert results[0]["harvest_status"] == "ok"
+        assert results[0]["abstract"] == "Abstract for 10.1/a"
+        assert results[1]["harvest_status"] == "ok"
+        assert results[1]["abstract"] == "Abstract for 10.1/b"
+        assert results[2]["harvest_status"] == "no_match"
+        assert results[2]["abstract"] == ""
+        assert call_count == 3
+
+    def test_skips_record_with_existing_abstract(self, session, monkeypatch):
+        """A record with an existing abstract gets skipped; provider is never called."""
+        record = self._make_record()
+        record["description.abstract"] = [{"value": "Already here"}]
+
+        def should_not_be_called(*args, **kwargs):
+            raise AssertionError(
+                "try_providers should not be called for skipped records"
+            )
+
+        monkeypatch.setattr("abstract_script.try_providers", should_not_be_called)
+
+        results = enrich_records(
+            [record],
+            session,
+            self.OA_RATE,
+            self.S2_RATE,
+            self.THRESHOLD,
+            self.SKIP_TYPES,
+        )
+
+        assert len(results) == 1
+        assert results[0]["harvest_status"] == "skipped_existing_abstract"
+
+    def test_skips_etd_record(self, session, monkeypatch):
+        """An ETD-Doctoral record gets skipped; provider is never called."""
+        record = self._make_record(resource_type="ETD-Doctoral")
+
+        def should_not_be_called(*args, **kwargs):
+            raise AssertionError("try_providers should not be called for ETD records")
+
+        monkeypatch.setattr("abstract_script.try_providers", should_not_be_called)
+
+        results = enrich_records(
+            [record],
+            session,
+            self.OA_RATE,
+            self.S2_RATE,
+            self.THRESHOLD,
+            self.SKIP_TYPES,
+        )
+
+        assert len(results) == 1
+        assert results[0]["harvest_status"] == "skipped_etd"
+
+    def test_skips_record_with_no_identifiers(self, session, monkeypatch):
+        """A record with no DOI and no title gets harvest_status='no_identifiers'."""
+        record = self._make_record(doi="", title="")
+
+        def should_not_be_called(*args, **kwargs):
+            raise AssertionError(
+                "try_providers should not be called with no identifiers"
+            )
+
+        monkeypatch.setattr("abstract_script.try_providers", should_not_be_called)
+
+        results = enrich_records(
+            [record],
+            session,
+            self.OA_RATE,
+            self.S2_RATE,
+            self.THRESHOLD,
+            self.SKIP_TYPES,
+        )
+
+        assert len(results) == 1
+        assert results[0]["harvest_status"] == "no_identifiers"
+
+    def test_handles_low_confidence_result(self, session, monkeypatch):
+        """A low_confidence result still includes the abstract in the output."""
+        record = self._make_record()
+
+        def mock_try_providers(sess, doi, title, oa_rate, s2_rate, threshold):
+            return (
+                {
+                    "abstract": "Fuzzy abstract",
+                    "matched_title": "Close Title",
+                    "external_id": "ext_123",
+                    "source": "s2",
+                },
+                "low_confidence",
+                ["oa_doi=miss", "s2_title=low_confidence"],
+            )
+
+        monkeypatch.setattr("abstract_script.try_providers", mock_try_providers)
+
+        results = enrich_records(
+            [record],
+            session,
+            self.OA_RATE,
+            self.S2_RATE,
+            self.THRESHOLD,
+            self.SKIP_TYPES,
+        )
+
+        assert len(results) == 1
+        assert results[0]["harvest_status"] == "low_confidence"
+        assert results[0]["abstract"] == "Fuzzy abstract"
+        assert results[0]["abstract_source"] == "s2"
+        assert results[0]["abstract_external_id"] == "ext_123"
+
+    def test_handles_provider_exception(self, session, monkeypatch, caplog):
+        """When try_providers raises, the record gets harvest_status='error' and loop continues."""
+        records = [
+            self._make_record(doi="10.1/a", title="Paper A"),
+            self._make_record(doi="10.1/b", title="Paper B"),
+        ]
+
+        call_count = 0
+
+        def mock_try_providers(sess, doi, title, oa_rate, s2_rate, threshold):
+            nonlocal call_count
+            call_count += 1
+            if doi == "10.1/a":
+                raise RuntimeError("provider exploded")
+            return (
+                {
+                    "abstract": "Good abstract",
+                    "matched_title": title,
+                    "external_id": "ext_b",
+                    "source": "openalex",
+                },
+                "ok",
+                ["oa_doi=hit"],
+            )
+
+        monkeypatch.setattr("abstract_script.try_providers", mock_try_providers)
+
+        with caplog.at_level(logging.WARNING):
+            results = enrich_records(
+                records,
+                session,
+                self.OA_RATE,
+                self.S2_RATE,
+                self.THRESHOLD,
+                self.SKIP_TYPES,
+            )
+
+        assert len(results) == 2
+        assert results[0]["harvest_status"] == "error"
+        assert results[1]["harvest_status"] == "ok"
+        assert results[1]["abstract"] == "Good abstract"
+        assert "Unexpected error" in caplog.text
+        assert call_count == 2
+
+    def test_empty_records_list(self, session, monkeypatch):
+        """An empty records list returns an empty results list."""
+
+        def should_not_be_called(*args, **kwargs):
+            raise AssertionError("try_providers should not be called for empty list")
+
+        monkeypatch.setattr("abstract_script.try_providers", should_not_be_called)
+
+        results = enrich_records(
+            [], session, self.OA_RATE, self.S2_RATE, self.THRESHOLD, self.SKIP_TYPES
+        )
+
+        assert results == []
+
+    def test_handles_malformed_record(self, session, monkeypatch, caplog):
+        """A malformed record (string instead of dict) triggers the error handler."""
+        records = ["not a dict", self._make_record()]
+
+        def mock_try_providers(sess, doi, title, oa_rate, s2_rate, threshold):
+            return (
+                {
+                    "abstract": "Good",
+                    "matched_title": title,
+                    "external_id": "ext_1",
+                    "source": "openalex",
+                },
+                "ok",
+                ["oa_doi=hit"],
+            )
+
+        monkeypatch.setattr("abstract_script.try_providers", mock_try_providers)
+
+        with caplog.at_level(logging.WARNING):
+            results = enrich_records(
+                records,
+                session,
+                self.OA_RATE,
+                self.S2_RATE,
+                self.THRESHOLD,
+                self.SKIP_TYPES,
+            )
+
+        assert len(results) == 2
+        assert results[0]["harvest_status"] == "error"
+        assert results[1]["harvest_status"] == "ok"
+        assert "Unexpected error" in caplog.text

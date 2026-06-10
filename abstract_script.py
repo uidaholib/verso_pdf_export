@@ -3,6 +3,11 @@
 import json
 import logging
 
+import requests
+from tqdm import tqdm
+
+from providers.harvester import try_providers
+
 logger = logging.getLogger(__name__)
 
 
@@ -60,18 +65,100 @@ def extract_identifiers(record: dict) -> tuple[str, str, str, str]:
     return (asset_id, doi, title, asset_type)
 
 
-def should_skip(record: dict, skip_types: list[str]) -> bool:
+def should_skip(record: dict, skip_types: list[str]) -> str | None:
     """Decide whether a record should be skipped during abstract enrichment.
 
-    Skips when the record already has a usable abstract (non-empty string in the
-    first element's "value" key) or when its resourceType is in skip_types
-    (e.g., ETDs that external APIs won't index).
+    Returns a reason string if the record should be skipped, or None if it
+    should be enriched.  The reason distinguishes "already has an abstract"
+    from "asset type is in the skip list" so callers can report accurately.
     """
     abstracts = record.get("description.abstract", [])
     if abstracts and abstracts[0].get("value", ""):
-        return True
+        return "skipped_existing_abstract"
 
     if record.get("resourceType", "") in skip_types:
-        return True
+        return "skipped_etd"
 
-    return False
+    return None
+
+
+def _make_result(
+    asset_id="",
+    doi="",
+    title="",
+    harvest_status="",
+    abstract="",
+    abstract_source="",
+    abstract_external_id="",
+    trace=None,
+) -> dict:
+    return {
+        "asset_id": asset_id,
+        "doi": doi,
+        "title": title,
+        "abstract": abstract,
+        "abstract_source": abstract_source,
+        "abstract_external_id": abstract_external_id,
+        "harvest_status": harvest_status,
+        "trace": trace if trace is not None else [],
+    }
+
+
+def enrich_records(
+    records: list[dict],
+    session: requests.Session,
+    oa_rate: float,
+    s2_rate: float,
+    threshold: int,
+    skip_types: list[str],
+) -> list[dict]:
+    """Iterate records, skip ineligible ones, and call providers for the rest.
+
+    Each record produces a result dict with harvest_status indicating
+    what happened: ok, low_confidence, no_match, skipped_existing_abstract,
+    skipped_etd, no_identifiers, or error.
+    """
+    results: list[dict] = []
+
+    for record in tqdm(records, desc="Enriching", unit="rec"):
+        try:
+            asset_id, doi, title, asset_type = extract_identifiers(record)
+
+            if not doi and not title:
+                results.append(_make_result(asset_id, doi, title, "no_identifiers"))
+                continue
+
+            skip_reason = should_skip(record, skip_types)
+            if skip_reason is not None:
+                results.append(_make_result(asset_id, doi, title, skip_reason))
+                continue
+
+            result, reason, trace = try_providers(
+                session, doi, title, oa_rate, s2_rate, threshold
+            )
+
+            if result is not None:
+                results.append(
+                    _make_result(
+                        asset_id,
+                        doi,
+                        title,
+                        reason,
+                        abstract=result["abstract"],
+                        abstract_source=result["source"],
+                        abstract_external_id=result["external_id"],
+                        trace=trace,
+                    )
+                )
+            else:
+                results.append(_make_result(asset_id, doi, title, reason, trace=trace))
+
+        except Exception:
+            logger.warning(
+                "Unexpected error processing record: %s",
+                record,
+                exc_info=True,
+            )
+            results.append(_make_result(harvest_status="error"))
+
+    return results
