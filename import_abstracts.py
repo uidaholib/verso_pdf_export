@@ -6,6 +6,9 @@ import os
 
 import bson
 from bson.errors import InvalidBSON
+from tqdm import tqdm
+
+from providers.harvester import title_match_score
 
 logger = logging.getLogger(__name__)
 
@@ -102,3 +105,82 @@ def build_doi_index(docs: list[dict]) -> dict[str, dict]:
             )
         index[normalized] = doc
     return index
+
+
+def match_records(
+    bson_docs: list[dict], verso_records: list[dict], threshold: int
+) -> list[dict]:
+    """Match BSON abstracts to VERSO records by DOI then fuzzy title fallback.
+
+    DOI matches are exact (score 100.0). Title matches use rapidfuzz
+    token_set_ratio and require score >= threshold. Ambiguous title matches
+    (2nd-best within 2 points of best) are logged as warnings.
+    """
+    if not bson_docs or not verso_records:
+        return []
+
+    doi_index = build_doi_index(bson_docs)
+    matches: list[dict] = []
+    doi_matched_indices: set[int] = set()
+
+    for i, rec in enumerate(verso_records):
+        if rec["doi"] and rec["doi"] in doi_index:
+            bson_doc = doi_index[rec["doi"]]
+            matches.append(
+                {
+                    "asset_id": rec["asset_id"],
+                    "verso_doi": rec["doi"],
+                    "verso_title": rec["title"],
+                    "abstract": bson_doc["abstract"],
+                    "abstract_source": bson_doc["abstract_source"],
+                    "abstract_external_id": bson_doc["abstract_external_id"],
+                    "match_method": "doi",
+                    "match_score": 100.0,
+                }
+            )
+            doi_matched_indices.add(i)
+
+    unmatched = [
+        (i, rec)
+        for i, rec in enumerate(verso_records)
+        if i not in doi_matched_indices and rec["title"]
+    ]
+
+    for _, rec in tqdm(unmatched, desc="Title matching", unit="rec"):
+        best_score = 0.0
+        second_best_score = 0.0
+        best_doc = None
+
+        for bson_doc in bson_docs:
+            score = title_match_score(rec["title"], bson_doc["title"])
+            if score > best_score:
+                second_best_score = best_score
+                best_score = score
+                best_doc = bson_doc
+            elif score > second_best_score:
+                second_best_score = score
+
+        if best_score >= threshold and best_doc is not None:
+            if best_score - second_best_score <= 2:
+                logger.warning(
+                    "Ambiguous title match for %r (best candidate: %r): "
+                    "best=%.1f, 2nd-best=%.1f",
+                    rec["title"],
+                    best_doc["title"],
+                    best_score,
+                    second_best_score,
+                )
+            matches.append(
+                {
+                    "asset_id": rec["asset_id"],
+                    "verso_doi": rec["doi"],
+                    "verso_title": rec["title"],
+                    "abstract": best_doc["abstract"],
+                    "abstract_source": best_doc["abstract_source"],
+                    "abstract_external_id": best_doc["abstract_external_id"],
+                    "match_method": "title",
+                    "match_score": best_score,
+                }
+            )
+
+    return matches

@@ -5,7 +5,14 @@ import logging
 
 import pytest
 
-from import_abstracts import build_doi_index, load_verso_records, parse_bson_abstracts
+from unittest.mock import patch
+
+from import_abstracts import (
+    build_doi_index,
+    load_verso_records,
+    match_records,
+    parse_bson_abstracts,
+)
 
 
 class TestParseBsonAbstracts:
@@ -355,3 +362,146 @@ class TestLoadVersoRecords:
         path = _write_metadata(tmp_path, records)
         result = load_verso_records(path)
         assert result[0]["title"] == ""
+
+
+def _make_verso(asset_id="1", doi="10.1/a", title="Title A"):
+    """Helper to build a minimal VERSO record dict."""
+    return {"asset_id": asset_id, "doi": doi, "title": title}
+
+
+class TestMatchRecords:
+    """Tests for match_records()."""
+
+    # 1. VERSO record DOI matches BSON index -> doi match, score 100.0
+    def test_doi_match(self):
+        bson_docs = [_make_doc(doi="10.1/a", abstract="Abstract A")]
+        verso = [_make_verso(asset_id="1", doi="10.1/a", title="Title A")]
+        result = match_records(bson_docs, verso, 90)
+        assert len(result) == 1
+        assert result[0]["match_method"] == "doi"
+        assert result[0]["match_score"] == 100.0
+        assert result[0]["asset_id"] == "1"
+        assert result[0]["abstract"] == "Abstract A"
+
+    # 2. DOI not in index, title fuzzy match >= threshold
+    def test_title_fuzzy_match_above_threshold(self):
+        bson_docs = [
+            _make_doc(doi="10.1/other", abstract="Abstract B"),
+        ]
+        bson_docs[0]["title"] = "Target Title"
+        verso = [_make_verso(asset_id="2", doi="10.1/nomatch", title="Target Title")]
+        with patch("import_abstracts.title_match_score") as mock_score:
+            mock_score.return_value = 92.0
+            result = match_records(bson_docs, verso, 80)
+        assert len(result) == 1
+        assert result[0]["match_method"] == "title"
+        assert result[0]["match_score"] == 92.0
+        assert result[0]["asset_id"] == "2"
+        assert result[0]["abstract"] == "Abstract B"
+
+    # 3. DOI not in index, title below threshold -> not matched
+    def test_title_below_threshold_not_matched(self):
+        bson_docs = [_make_doc(doi="10.1/other", abstract="Abstract C")]
+        bson_docs[0]["title"] = "Completely unrelated quantum physics paper"
+        verso = [
+            _make_verso(asset_id="3", doi="10.1/nomatch", title="Marine biology study")
+        ]
+        result = match_records(bson_docs, verso, 90)
+        assert len(result) == 0
+
+    # 4. VERSO record with no DOI and no title -> skipped
+    def test_no_doi_no_title_skipped(self):
+        bson_docs = [_make_doc(doi="10.1/a", abstract="Abstract D")]
+        verso = [_make_verso(asset_id="4", doi="", title="")]
+        result = match_records(bson_docs, verso, 90)
+        assert len(result) == 0
+
+    # 5. Multiple BSON docs match same VERSO title, scores differ by >2 -> best wins, no warning
+    def test_multiple_matches_best_wins_no_warning(self, caplog):
+        bson_docs = [
+            _make_doc(doi="10.1/x", abstract="Abstract X"),
+            _make_doc(doi="10.1/y", abstract="Abstract Y"),
+        ]
+        bson_docs[0]["title"] = "First Candidate"
+        bson_docs[1]["title"] = "Second Candidate"
+        verso = [_make_verso(asset_id="5", doi="10.1/nomatch", title="Target Title")]
+        with patch("import_abstracts.title_match_score") as mock_score:
+
+            def score_fn(local, candidate):
+                if candidate == "First Candidate":
+                    return 95.0
+                if candidate == "Second Candidate":
+                    return 85.0
+                return 0.0
+
+            mock_score.side_effect = score_fn
+            with caplog.at_level(logging.WARNING):
+                result = match_records(bson_docs, verso, 80)
+        assert len(result) == 1
+        assert result[0]["match_score"] == 95.0
+        assert result[0]["abstract"] == "Abstract X"
+        assert "ambiguous" not in caplog.text.lower()
+
+    # 6. Multiple BSON docs match same VERSO title, scores within 2 points -> warning logged
+    def test_ambiguous_match_logs_warning(self, caplog):
+        bson_docs = [
+            _make_doc(doi="10.1/x", abstract="Abstract X"),
+            _make_doc(doi="10.1/y", abstract="Abstract Y"),
+        ]
+        bson_docs[0]["title"] = "First Candidate"
+        bson_docs[1]["title"] = "Second Candidate"
+        verso = [_make_verso(asset_id="6", doi="10.1/nomatch", title="Target Title")]
+        with patch("import_abstracts.title_match_score") as mock_score:
+
+            def score_fn(local, candidate):
+                if candidate == "First Candidate":
+                    return 92.0
+                if candidate == "Second Candidate":
+                    return 91.0
+                return 0.0
+
+            mock_score.side_effect = score_fn
+            with caplog.at_level(logging.WARNING):
+                result = match_records(bson_docs, verso, 80)
+        assert len(result) == 1
+        assert result[0]["match_score"] == 92.0
+        assert "ambiguous" in caplog.text.lower()
+
+    # 7. Empty BSON docs list -> empty results
+    def test_empty_bson_docs(self):
+        verso = [_make_verso(asset_id="7", doi="10.1/a", title="Title")]
+        result = match_records([], verso, 90)
+        assert result == []
+
+    # 8. Empty VERSO records list -> empty results
+    def test_empty_verso_records(self):
+        bson_docs = [_make_doc(doi="10.1/a", abstract="Abstract")]
+        result = match_records(bson_docs, [], 90)
+        assert result == []
+
+    # 9. VERSO record already DOI-matched is not duplicated by title pass
+    def test_doi_matched_not_duplicated_by_title(self):
+        bson_docs = [_make_doc(doi="10.1/a", abstract="Abstract A")]
+        bson_docs[0]["title"] = "Exact Same Title"
+        verso = [_make_verso(asset_id="9", doi="10.1/a", title="Exact Same Title")]
+        result = match_records(bson_docs, verso, 80)
+        assert len(result) == 1
+        assert result[0]["match_method"] == "doi"
+
+    # 10. Returned dict shape has exactly the 8 expected keys
+    def test_returned_dict_shape(self):
+        bson_docs = [_make_doc(doi="10.1/a", abstract="Abstract")]
+        verso = [_make_verso(asset_id="10", doi="10.1/a", title="Title")]
+        result = match_records(bson_docs, verso, 90)
+        assert len(result) == 1
+        expected_keys = {
+            "asset_id",
+            "verso_doi",
+            "verso_title",
+            "abstract",
+            "abstract_source",
+            "abstract_external_id",
+            "match_method",
+            "match_score",
+        }
+        assert set(result[0].keys()) == expected_keys
