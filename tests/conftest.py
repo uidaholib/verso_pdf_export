@@ -1,5 +1,6 @@
 """Shared pytest fixtures for the verso_pdf_export test suite."""
 
+import bson
 import pytest
 import requests
 
@@ -53,3 +54,17 @@ def sample_esploro_record():
             }
         ],
     }
+
+
+@pytest.fixture
+def write_bson_file(tmp_path):
+    """Write a list of dicts as a multi-document BSON file."""
+
+    def _write(docs, filename="test.bson"):
+        path = tmp_path / filename
+        with open(path, "wb") as f:
+            for doc in docs:
+                f.write(bson.encode(doc))
+        return str(path)
+
+    return _write
