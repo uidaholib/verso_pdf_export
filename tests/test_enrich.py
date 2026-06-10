@@ -275,3 +275,18 @@ class TestEnrichFinalOutput:
         assert len(result) == 2
         assert result["1"]["harvest_status"] == "skipped_etd"
         assert result["2"]["harvest_status"] == "skipped_etd"
+
+    def test_malformed_record_string_yields_error(self, monkeypatch, caplog):
+        """#13: A string instead of dict triggers error handler; loop continues."""
+
+        def mock_try_providers(*args, **kwargs):
+            raise AssertionError("should not be called for malformed record")
+
+        monkeypatch.setattr("providers.enrich.try_providers", mock_try_providers)
+
+        with caplog.at_level(logging.WARNING, logger="providers.enrich"):
+            result = enrich_final_output(["not a dict"], requests.Session(), 0.0, 0.0)
+
+        assert "" in result
+        assert result[""]["harvest_status"] == "error"
+        assert any("Unexpected error" in msg for msg in caplog.messages)

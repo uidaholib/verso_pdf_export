@@ -9,10 +9,10 @@ import pytest
 import pandas as pd
 
 from abstract_script import (
-    enrich_records,
     extract_identifiers,
     load_metadata,
     main,
+    merge_enrichment_results,
     parse_args,
     should_skip,
     write_results_csv,
@@ -218,263 +218,141 @@ class TestShouldSkip:
         assert should_skip(record, self.SKIP_TYPES) is None
 
 
-class TestEnrichRecords:
-    """Validate the main enrichment loop over a list of Esploro records."""
-
-    OA_RATE = 0.1
-    S2_RATE = 1.0
-    THRESHOLD = 90
-    SKIP_TYPES = ["ETD-Doctoral", "ETD-Masters"]
+class TestMergeEnrichmentResults:
+    """Validate that merge_enrichment_results bridges enrich_final_output's dict
+    return type to the flat list[dict] that write_results_csv expects."""
 
     @staticmethod
     def _make_record(
-        doi="10.1234/test", title="Test Paper", resource_type="journal_article"
+        asset_id="99999",
+        doi="10.1234/test",
+        title="Test Paper",
+        resource_type="journal_article",
     ):
         """Build a minimal Esploro-shaped record dict."""
         return {
-            "originalRepository": {"assetId": "99999"},
+            "originalRepository": {"assetId": asset_id},
             "identifier.doi": doi,
             "title": title,
             "resourceType": resource_type,
         }
 
-    def test_enriches_records_with_abstracts(self, session, monkeypatch):
-        """Provider returns abstracts for 2 of 3 records; third gets no_match."""
+    def test_merges_enrichment_for_matching_records(self):
+        """3 records with enrichment for 2 yields 3-item list; 2 with abstracts, 1 empty."""
         records = [
-            self._make_record(doi="10.1/a", title="Paper A"),
-            self._make_record(doi="10.1/b", title="Paper B"),
-            self._make_record(doi="10.1/c", title="Paper C"),
+            self._make_record(asset_id="1", doi="10.1/a", title="Paper A"),
+            self._make_record(asset_id="2", doi="10.1/b", title="Paper B"),
+            self._make_record(asset_id="3", doi="10.1/c", title="Paper C"),
+        ]
+        enrichment_results = {
+            "1": {
+                "abstract": "Abstract A",
+                "abstract_source": "openalex",
+                "abstract_external_id": "W1",
+                "harvest_status": "ok",
+                "trace": ["oa_doi=hit"],
+            },
+            "2": {
+                "abstract": "Abstract B",
+                "abstract_source": "s2",
+                "abstract_external_id": "S2",
+                "harvest_status": "ok",
+                "trace": ["s2_doi=hit"],
+            },
+        }
+
+        result = merge_enrichment_results(enrichment_results, records)
+
+        assert len(result) == 3
+        assert result[0]["abstract"] == "Abstract A"
+        assert result[0]["harvest_status"] == "ok"
+        assert result[1]["abstract"] == "Abstract B"
+        assert result[2]["abstract"] == ""
+        assert result[2]["harvest_status"] == ""
+
+    def test_empty_enrichment_results_yields_empty_fields(self):
+        """Empty enrichment results with 2 records yields 2 items with all fields empty."""
+        records = [
+            self._make_record(asset_id="1"),
+            self._make_record(asset_id="2"),
         ]
 
-        call_count = 0
+        result = merge_enrichment_results({}, records)
 
-        def mock_try_providers(sess, doi, title, oa_rate, s2_rate, threshold):
-            nonlocal call_count
-            call_count += 1
-            if doi in ("10.1/a", "10.1/b"):
-                return (
-                    {
-                        "abstract": f"Abstract for {doi}",
-                        "matched_title": title,
-                        "external_id": f"ext_{doi}",
-                        "source": "openalex",
-                    },
-                    "ok",
-                    [f"oa_doi={doi}"],
-                )
-            return (None, "no_match", ["oa_doi=miss", "s2_doi=miss"])
+        assert len(result) == 2
+        for row in result:
+            assert row["abstract"] == ""
+            assert row["abstract_source"] == ""
+            assert row["abstract_external_id"] == ""
+            assert row["harvest_status"] == ""
 
-        monkeypatch.setattr("abstract_script.try_providers", mock_try_providers)
+    def test_empty_records_returns_empty_list(self):
+        """Empty records list returns empty list regardless of enrichment data."""
+        result = merge_enrichment_results({"1": {"harvest_status": "ok"}}, [])
 
-        results = enrich_records(
-            records,
-            session,
-            self.OA_RATE,
-            self.S2_RATE,
-            self.THRESHOLD,
-            self.SKIP_TYPES,
-        )
+        assert result == []
 
-        assert len(results) == 3
-        assert results[0]["harvest_status"] == "ok"
-        assert results[0]["abstract"] == "Abstract for 10.1/a"
-        assert results[1]["harvest_status"] == "ok"
-        assert results[1]["abstract"] == "Abstract for 10.1/b"
-        assert results[2]["harvest_status"] == "no_match"
-        assert results[2]["abstract"] == ""
-        assert call_count == 3
+    def test_asset_id_int_in_record_str_in_results(self):
+        """Lookup succeeds when record has int asset_id and results key is str."""
+        record = self._make_record(asset_id="42")
+        # Simulate an int assetId in the record — extract_identifiers converts to str
+        record["originalRepository"]["assetId"] = 42
+        enrichment_results = {
+            "42": {
+                "abstract": "Found it",
+                "abstract_source": "openalex",
+                "abstract_external_id": "W42",
+                "harvest_status": "ok",
+                "trace": [],
+            },
+        }
 
-    def test_skips_record_with_existing_abstract(self, session, monkeypatch):
-        """A record with an existing abstract gets skipped; provider is never called."""
-        record = self._make_record()
-        record["description.abstract"] = [{"value": "Already here"}]
+        result = merge_enrichment_results(enrichment_results, [record])
 
-        def should_not_be_called(*args, **kwargs):
-            raise AssertionError(
-                "try_providers should not be called for skipped records"
-            )
+        assert len(result) == 1
+        assert result[0]["abstract"] == "Found it"
+        assert result[0]["asset_id"] == "42"
 
-        monkeypatch.setattr("abstract_script.try_providers", should_not_be_called)
+    def test_trace_list_preserved(self):
+        """Trace list from enrichment is preserved as-is (not serialized)."""
+        records = [self._make_record(asset_id="1")]
+        enrichment_results = {
+            "1": {
+                "abstract": "Text",
+                "abstract_source": "openalex",
+                "abstract_external_id": "W1",
+                "harvest_status": "ok",
+                "trace": ["oa_doi=hit", "s2_doi=miss"],
+            },
+        }
 
-        results = enrich_records(
-            [record],
-            session,
-            self.OA_RATE,
-            self.S2_RATE,
-            self.THRESHOLD,
-            self.SKIP_TYPES,
-        )
+        result = merge_enrichment_results(enrichment_results, records)
 
-        assert len(results) == 1
-        assert results[0]["harvest_status"] == "skipped_existing_abstract"
+        assert result[0]["trace"] == ["oa_doi=hit", "s2_doi=miss"]
+        assert isinstance(result[0]["trace"], list)
 
-    def test_skips_etd_record(self, session, monkeypatch):
-        """An ETD-Doctoral record gets skipped; provider is never called."""
-        record = self._make_record(resource_type="ETD-Doctoral")
+    def test_record_missing_original_repository(self):
+        """Record missing originalRepository key uses empty-string asset_id."""
+        record = {
+            "identifier.doi": "10.1/x",
+            "title": "Orphan Paper",
+            "resourceType": "journal_article",
+        }
+        enrichment_results = {
+            "": {
+                "abstract": "Found via empty key",
+                "abstract_source": "openalex",
+                "abstract_external_id": "W0",
+                "harvest_status": "ok",
+                "trace": [],
+            },
+        }
 
-        def should_not_be_called(*args, **kwargs):
-            raise AssertionError("try_providers should not be called for ETD records")
+        result = merge_enrichment_results(enrichment_results, [record])
 
-        monkeypatch.setattr("abstract_script.try_providers", should_not_be_called)
-
-        results = enrich_records(
-            [record],
-            session,
-            self.OA_RATE,
-            self.S2_RATE,
-            self.THRESHOLD,
-            self.SKIP_TYPES,
-        )
-
-        assert len(results) == 1
-        assert results[0]["harvest_status"] == "skipped_etd"
-
-    def test_skips_record_with_no_identifiers(self, session, monkeypatch):
-        """A record with no DOI and no title gets harvest_status='no_identifiers'."""
-        record = self._make_record(doi="", title="")
-
-        def should_not_be_called(*args, **kwargs):
-            raise AssertionError(
-                "try_providers should not be called with no identifiers"
-            )
-
-        monkeypatch.setattr("abstract_script.try_providers", should_not_be_called)
-
-        results = enrich_records(
-            [record],
-            session,
-            self.OA_RATE,
-            self.S2_RATE,
-            self.THRESHOLD,
-            self.SKIP_TYPES,
-        )
-
-        assert len(results) == 1
-        assert results[0]["harvest_status"] == "no_identifiers"
-
-    def test_handles_low_confidence_result(self, session, monkeypatch):
-        """A low_confidence result still includes the abstract in the output."""
-        record = self._make_record()
-
-        def mock_try_providers(sess, doi, title, oa_rate, s2_rate, threshold):
-            return (
-                {
-                    "abstract": "Fuzzy abstract",
-                    "matched_title": "Close Title",
-                    "external_id": "ext_123",
-                    "source": "s2",
-                },
-                "low_confidence",
-                ["oa_doi=miss", "s2_title=low_confidence"],
-            )
-
-        monkeypatch.setattr("abstract_script.try_providers", mock_try_providers)
-
-        results = enrich_records(
-            [record],
-            session,
-            self.OA_RATE,
-            self.S2_RATE,
-            self.THRESHOLD,
-            self.SKIP_TYPES,
-        )
-
-        assert len(results) == 1
-        assert results[0]["harvest_status"] == "low_confidence"
-        assert results[0]["abstract"] == "Fuzzy abstract"
-        assert results[0]["abstract_source"] == "s2"
-        assert results[0]["abstract_external_id"] == "ext_123"
-
-    def test_handles_provider_exception(self, session, monkeypatch, caplog):
-        """When try_providers raises, the record gets harvest_status='error' and loop continues."""
-        records = [
-            self._make_record(doi="10.1/a", title="Paper A"),
-            self._make_record(doi="10.1/b", title="Paper B"),
-        ]
-
-        call_count = 0
-
-        def mock_try_providers(sess, doi, title, oa_rate, s2_rate, threshold):
-            nonlocal call_count
-            call_count += 1
-            if doi == "10.1/a":
-                raise RuntimeError("provider exploded")
-            return (
-                {
-                    "abstract": "Good abstract",
-                    "matched_title": title,
-                    "external_id": "ext_b",
-                    "source": "openalex",
-                },
-                "ok",
-                ["oa_doi=hit"],
-            )
-
-        monkeypatch.setattr("abstract_script.try_providers", mock_try_providers)
-
-        with caplog.at_level(logging.WARNING):
-            results = enrich_records(
-                records,
-                session,
-                self.OA_RATE,
-                self.S2_RATE,
-                self.THRESHOLD,
-                self.SKIP_TYPES,
-            )
-
-        assert len(results) == 2
-        assert results[0]["harvest_status"] == "error"
-        assert results[1]["harvest_status"] == "ok"
-        assert results[1]["abstract"] == "Good abstract"
-        assert "Unexpected error" in caplog.text
-        assert call_count == 2
-
-    def test_empty_records_list(self, session, monkeypatch):
-        """An empty records list returns an empty results list."""
-
-        def should_not_be_called(*args, **kwargs):
-            raise AssertionError("try_providers should not be called for empty list")
-
-        monkeypatch.setattr("abstract_script.try_providers", should_not_be_called)
-
-        results = enrich_records(
-            [], session, self.OA_RATE, self.S2_RATE, self.THRESHOLD, self.SKIP_TYPES
-        )
-
-        assert results == []
-
-    def test_handles_malformed_record(self, session, monkeypatch, caplog):
-        """A malformed record (string instead of dict) triggers the error handler."""
-        records = ["not a dict", self._make_record()]
-
-        def mock_try_providers(sess, doi, title, oa_rate, s2_rate, threshold):
-            return (
-                {
-                    "abstract": "Good",
-                    "matched_title": title,
-                    "external_id": "ext_1",
-                    "source": "openalex",
-                },
-                "ok",
-                ["oa_doi=hit"],
-            )
-
-        monkeypatch.setattr("abstract_script.try_providers", mock_try_providers)
-
-        with caplog.at_level(logging.WARNING):
-            results = enrich_records(
-                records,
-                session,
-                self.OA_RATE,
-                self.S2_RATE,
-                self.THRESHOLD,
-                self.SKIP_TYPES,
-            )
-
-        assert len(results) == 2
-        assert results[0]["harvest_status"] == "error"
-        assert results[1]["harvest_status"] == "ok"
-        assert "Unexpected error" in caplog.text
+        assert len(result) == 1
+        assert result[0]["asset_id"] == ""
+        assert result[0]["abstract"] == "Found via empty key"
 
 
 class TestWriteResultsCsv:
@@ -639,7 +517,7 @@ class TestMain:
         ]
 
     def test_debug_limits_records(self, tmp_path, monkeypatch):
-        """In --debug mode, only first 5 of 10 records are passed to enrich_records."""
+        """In --debug mode, only first 5 of 10 records are passed to enrich_final_output."""
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr("abstract_script.load_dotenv", lambda: None)
         monkeypatch.setattr(
@@ -650,9 +528,15 @@ class TestMain:
 
         def mock_enrich(records, session, oa_rate, s2_rate, threshold, skip_types):
             captured_records.extend(records)
-            return [{"harvest_status": "ok"} for _ in records]
+            return {
+                str(r["originalRepository"]["assetId"]): {"harvest_status": "ok"}
+                for r in records
+            }
 
-        monkeypatch.setattr("abstract_script.enrich_records", mock_enrich)
+        monkeypatch.setattr("abstract_script.enrich_final_output", mock_enrich)
+        monkeypatch.setattr(
+            "abstract_script.merge_enrichment_results", lambda results, records: []
+        )
         monkeypatch.setattr(
             "abstract_script.write_results_csv", lambda results, path: None
         )
@@ -673,9 +557,15 @@ class TestMain:
 
         def mock_enrich(records, session, oa_rate, s2_rate, threshold, skip_types):
             captured_records.extend(records)
-            return [{"harvest_status": "ok"} for _ in records]
+            return {
+                str(r["originalRepository"]["assetId"]): {"harvest_status": "ok"}
+                for r in records
+            }
 
-        monkeypatch.setattr("abstract_script.enrich_records", mock_enrich)
+        monkeypatch.setattr("abstract_script.enrich_final_output", mock_enrich)
+        monkeypatch.setattr(
+            "abstract_script.merge_enrichment_results", lambda results, records: []
+        )
         monkeypatch.setattr(
             "abstract_script.write_results_csv", lambda results, path: None
         )
@@ -685,7 +575,7 @@ class TestMain:
         assert len(captured_records) == 2
 
     def test_fuzzy_threshold_flag_forwarded_to_enrich(self, tmp_path, monkeypatch):
-        """--fuzzy-threshold 85 is forwarded to enrich_records as threshold=85."""
+        """--fuzzy-threshold 85 is forwarded to enrich_final_output as threshold=85."""
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr("abstract_script.load_dotenv", lambda: None)
         monkeypatch.setattr(
@@ -696,9 +586,12 @@ class TestMain:
 
         def mock_enrich(records, session, oa_rate, s2_rate, threshold, skip_types):
             captured_threshold["value"] = threshold
-            return [{"harvest_status": "ok"}]
+            return {}
 
-        monkeypatch.setattr("abstract_script.enrich_records", mock_enrich)
+        monkeypatch.setattr("abstract_script.enrich_final_output", mock_enrich)
+        monkeypatch.setattr(
+            "abstract_script.merge_enrichment_results", lambda results, records: []
+        )
         monkeypatch.setattr(
             "abstract_script.write_results_csv", lambda results, path: None
         )
@@ -708,7 +601,7 @@ class TestMain:
         assert captured_threshold["value"] == 85
 
     def test_happy_path_calls_pipeline_in_order(self, tmp_path, monkeypatch):
-        """main() calls load_metadata, enrich_records, write_results_csv in sequence."""
+        """main() calls load_metadata, enrich_final_output, merge_enrichment_results, write_results_csv in sequence."""
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr("abstract_script.load_dotenv", lambda: None)
 
@@ -719,19 +612,29 @@ class TestMain:
             return self._mock_records(2)
 
         def mock_enrich(records, session, oa_rate, s2_rate, threshold, skip_types):
-            call_order.append("enrich_records")
-            return [{"harvest_status": "ok"} for _ in records]
+            call_order.append("enrich_final_output")
+            return {}
+
+        def mock_merge(enrichment_results, records):
+            call_order.append("merge_enrichment_results")
+            return []
 
         def mock_write(results, path):
             call_order.append("write_results_csv")
 
         monkeypatch.setattr("abstract_script.load_metadata", mock_load)
-        monkeypatch.setattr("abstract_script.enrich_records", mock_enrich)
+        monkeypatch.setattr("abstract_script.enrich_final_output", mock_enrich)
+        monkeypatch.setattr("abstract_script.merge_enrichment_results", mock_merge)
         monkeypatch.setattr("abstract_script.write_results_csv", mock_write)
 
         main(["--metadata", "fake.json"])
 
-        assert call_order == ["load_metadata", "enrich_records", "write_results_csv"]
+        assert call_order == [
+            "load_metadata",
+            "enrich_final_output",
+            "merge_enrichment_results",
+            "write_results_csv",
+        ]
 
     def test_creates_timestamped_directory(self, tmp_path, monkeypatch):
         """main() creates C/{timestamp}/ directory."""
@@ -741,8 +644,12 @@ class TestMain:
             "abstract_script.load_metadata", lambda path: self._mock_records(1)
         )
         monkeypatch.setattr(
-            "abstract_script.enrich_records",
-            lambda *args, **kwargs: [{"harvest_status": "ok"}],
+            "abstract_script.enrich_final_output",
+            lambda *args, **kwargs: {},
+        )
+        monkeypatch.setattr(
+            "abstract_script.merge_enrichment_results",
+            lambda results, records: [],
         )
         monkeypatch.setattr(
             "abstract_script.write_results_csv", lambda results, path: None
@@ -766,8 +673,12 @@ class TestMain:
             "abstract_script.load_metadata", lambda path: self._mock_records(1)
         )
         monkeypatch.setattr(
-            "abstract_script.enrich_records",
-            lambda *args, **kwargs: [{"harvest_status": "ok"}],
+            "abstract_script.enrich_final_output",
+            lambda *args, **kwargs: {},
+        )
+        monkeypatch.setattr(
+            "abstract_script.merge_enrichment_results",
+            lambda results, records: [],
         )
         monkeypatch.setattr(
             "abstract_script.write_results_csv", lambda results, path: None
@@ -791,7 +702,7 @@ class TestMain:
         assert "nonexistent.json" in str(exc_info.value)
 
     def test_default_rate_intervals(self, tmp_path, monkeypatch):
-        """Without env vars, defaults 0.1 and 1.0 are passed to enrich_records."""
+        """Without env vars, defaults 0.1 and 1.0 are passed to enrich_final_output."""
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr("abstract_script.load_dotenv", lambda: None)
         monkeypatch.setattr(
@@ -805,9 +716,12 @@ class TestMain:
         def mock_enrich(records, session, oa_rate, s2_rate, threshold, skip_types):
             captured_rates["oa"] = oa_rate
             captured_rates["s2"] = s2_rate
-            return [{"harvest_status": "ok"}]
+            return {}
 
-        monkeypatch.setattr("abstract_script.enrich_records", mock_enrich)
+        monkeypatch.setattr("abstract_script.enrich_final_output", mock_enrich)
+        monkeypatch.setattr(
+            "abstract_script.merge_enrichment_results", lambda results, records: []
+        )
         monkeypatch.setattr(
             "abstract_script.write_results_csv", lambda results, path: None
         )
@@ -818,7 +732,7 @@ class TestMain:
         assert captured_rates["s2"] == 1.0
 
     def test_custom_rate_intervals_from_env(self, tmp_path, monkeypatch):
-        """Custom env vars are passed as floats to enrich_records."""
+        """Custom env vars are passed as floats to enrich_final_output."""
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr("abstract_script.load_dotenv", lambda: None)
         monkeypatch.setattr(
@@ -832,9 +746,12 @@ class TestMain:
         def mock_enrich(records, session, oa_rate, s2_rate, threshold, skip_types):
             captured_rates["oa"] = oa_rate
             captured_rates["s2"] = s2_rate
-            return [{"harvest_status": "ok"}]
+            return {}
 
-        monkeypatch.setattr("abstract_script.enrich_records", mock_enrich)
+        monkeypatch.setattr("abstract_script.enrich_final_output", mock_enrich)
+        monkeypatch.setattr(
+            "abstract_script.merge_enrichment_results", lambda results, records: []
+        )
         monkeypatch.setattr(
             "abstract_script.write_results_csv", lambda results, path: None
         )

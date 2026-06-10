@@ -10,10 +10,8 @@ from datetime import datetime
 import pandas as pd
 import requests
 from dotenv import load_dotenv
-from tqdm import tqdm
 
-from providers.enrich import extract_identifiers, should_skip
-from providers.harvester import try_providers
+from providers.enrich import enrich_final_output, extract_identifiers
 
 logger = logging.getLogger(__name__)
 
@@ -63,86 +61,29 @@ def load_metadata(path: str) -> list[dict]:
     return records
 
 
-def _make_result(
-    asset_id="",
-    doi="",
-    title="",
-    harvest_status="",
-    abstract="",
-    abstract_source="",
-    abstract_external_id="",
-    trace=None,
-) -> dict:
-    return {
-        "asset_id": asset_id,
-        "doi": doi,
-        "title": title,
-        "abstract": abstract,
-        "abstract_source": abstract_source,
-        "abstract_external_id": abstract_external_id,
-        "harvest_status": harvest_status,
-        "trace": trace if trace is not None else [],
-    }
-
-
-def enrich_records(
+def merge_enrichment_results(
+    enrichment_results: dict[str, dict],
     records: list[dict],
-    session: requests.Session,
-    oa_rate: float,
-    s2_rate: float,
-    threshold: int,
-    skip_types: list[str],
 ) -> list[dict]:
-    """Iterate records, skip ineligible ones, and call providers for the rest.
-
-    Each record produces a result dict with harvest_status indicating
-    what happened: ok, low_confidence, no_match, skipped_existing_abstract,
-    skipped_etd, no_identifiers, or error.
-    """
-    results: list[dict] = []
-
-    for record in tqdm(records, desc="Enriching", unit="rec"):
-        try:
-            asset_id, doi, title, asset_type = extract_identifiers(record)
-
-            if not doi and not title:
-                results.append(_make_result(asset_id, doi, title, "no_identifiers"))
-                continue
-
-            skip_reason = should_skip(record, skip_types)
-            if skip_reason is not None:
-                results.append(_make_result(asset_id, doi, title, skip_reason))
-                continue
-
-            result, reason, trace = try_providers(
-                session, doi, title, oa_rate, s2_rate, threshold
-            )
-
-            if result is not None:
-                results.append(
-                    _make_result(
-                        asset_id,
-                        doi,
-                        title,
-                        reason,
-                        abstract=result["abstract"],
-                        abstract_source=result["source"],
-                        abstract_external_id=result["external_id"],
-                        trace=trace,
-                    )
-                )
-            else:
-                results.append(_make_result(asset_id, doi, title, reason, trace=trace))
-
-        except Exception:
-            logger.warning(
-                "Unexpected error processing record: %s",
-                record,
-                exc_info=True,
-            )
-            results.append(_make_result(harvest_status="error"))
-
-    return results
+    """Convert enrich_final_output's dict-keyed-by-asset_id into the flat list
+    that write_results_csv expects, preserving the original record order."""
+    merged: list[dict] = []
+    for record in records:
+        asset_id, doi, title, _asset_type = extract_identifiers(record)
+        enrichment = enrichment_results.get(str(asset_id), {})
+        merged.append(
+            {
+                "asset_id": asset_id,
+                "doi": doi,
+                "title": title,
+                "abstract": enrichment.get("abstract", ""),
+                "abstract_source": enrichment.get("abstract_source", ""),
+                "abstract_external_id": enrichment.get("abstract_external_id", ""),
+                "harvest_status": enrichment.get("harvest_status", ""),
+                "trace": enrichment.get("trace", []),
+            }
+        )
+    return merged
 
 
 def write_results_csv(results: list[dict], path: str) -> None:
@@ -247,24 +188,14 @@ def main(argv: list[str] | None = None) -> None:
     oa_rate = float(os.environ.get("OPENALEX_RATE_INTERVAL", "0.1"))
     s2_rate = float(os.environ.get("S2_RATE_INTERVAL", "1.0"))
 
-    results = enrich_records(
+    enrichment_results = enrich_final_output(
         records, session, oa_rate, s2_rate, args.fuzzy_threshold, ASSET_TYPES_TO_SKIP
     )
+    results = merge_enrichment_results(enrichment_results, records)
 
     write_results_csv(results, f"C/{timestamp}/abstract_metadata.csv")
 
-    enriched = sum(
-        1 for r in results if r["harvest_status"] in ("ok", "low_confidence")
-    )
-    skipped = sum(1 for r in results if r["harvest_status"].startswith("skipped"))
-    no_match = sum(1 for r in results if r["harvest_status"] == "no_match")
-    errors = sum(1 for r in results if r["harvest_status"] == "error")
-
-    print(f"Total processed: {len(results)}")
-    print(f"Enriched: {enriched}")
-    print(f"Skipped: {skipped}")
-    print(f"No match: {no_match}")
-    print(f"Errors: {errors}")
+    print(f"Results written to C/{timestamp}/abstract_metadata.csv")
 
 
 if __name__ == "__main__":
