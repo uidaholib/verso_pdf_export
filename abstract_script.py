@@ -184,13 +184,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Enrich VERSO metadata records with abstracts from external APIs."
     )
     parser.add_argument(
-        "metadata_path",
+        "--metadata",
+        required=True,
         help="Path to asset_metadata.json file",
     )
     parser.add_argument(
         "--debug",
         action="store_true",
         help=f"Limit processing to first {DEBUG_SUBSET_SIZE} records",
+    )
+    parser.add_argument(
+        "--subset-size",
+        type=int,
+        default=DEBUG_SUBSET_SIZE,
+        help=f"Number of records to process in debug mode (default: {DEBUG_SUBSET_SIZE})",
+    )
+    parser.add_argument(
+        "--fuzzy-threshold",
+        type=int,
+        default=FUZZY_THRESHOLD,
+        help=f"Minimum fuzzy-match score for title matching (default: {FUZZY_THRESHOLD})",
     )
     return parser.parse_args(argv)
 
@@ -219,12 +232,12 @@ def main(argv: list[str] | None = None) -> None:
     logging.getLogger().addHandler(console_handler)
 
     try:
-        records = load_metadata(args.metadata_path)
+        records = load_metadata(args.metadata)
     except ValueError as exc:
         sys.exit(str(exc))
 
     if args.debug:
-        records = records[:DEBUG_SUBSET_SIZE]
+        records = records[: args.subset_size]
         logger.info("DEBUG mode: processing first %d records", len(records))
     else:
         logger.info("Processing %d records", len(records))
@@ -235,7 +248,7 @@ def main(argv: list[str] | None = None) -> None:
     s2_rate = float(os.environ.get("S2_RATE_INTERVAL", "1.0"))
 
     results = enrich_records(
-        records, session, oa_rate, s2_rate, FUZZY_THRESHOLD, ASSET_TYPES_TO_SKIP
+        records, session, oa_rate, s2_rate, args.fuzzy_threshold, ASSET_TYPES_TO_SKIP
     )
 
     write_results_csv(results, f"C/{timestamp}/abstract_metadata.csv")

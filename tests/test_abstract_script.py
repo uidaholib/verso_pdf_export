@@ -558,23 +558,56 @@ class TestWriteResultsCsv:
 class TestParseArgs:
     """Validate CLI argument parsing."""
 
-    def test_positional_metadata_path(self):
-        """Positional arg sets metadata_path, debug defaults to False."""
-        args = parse_args(["path/to/metadata.json"])
+    def test_no_args_raises_system_exit(self):
+        """Missing required --metadata flag causes SystemExit."""
+        with pytest.raises(SystemExit):
+            parse_args([])
 
-        assert args.metadata_path == "path/to/metadata.json"
+    def test_metadata_flag_sets_metadata(self):
+        """--metadata flag sets metadata, debug defaults to False, other defaults apply."""
+        args = parse_args(["--metadata", "path.json"])
+
+        assert args.metadata == "path.json"
         assert args.debug is False
+        assert args.subset_size == 5
+        assert args.fuzzy_threshold == 90
 
     def test_debug_flag(self):
         """--debug flag sets debug to True."""
-        args = parse_args(["path.json", "--debug"])
+        args = parse_args(["--metadata", "p.json", "--debug"])
 
         assert args.debug is True
 
-    def test_no_args_raises_system_exit(self):
-        """Missing positional arg causes SystemExit."""
-        with pytest.raises(SystemExit):
-            parse_args([])
+    def test_subset_size_flag(self):
+        """--subset-size overrides default."""
+        args = parse_args(["--metadata", "p.json", "--subset-size", "3"])
+
+        assert args.subset_size == 3
+
+    def test_fuzzy_threshold_flag(self):
+        """--fuzzy-threshold overrides default."""
+        args = parse_args(["--metadata", "p.json", "--fuzzy-threshold", "85"])
+
+        assert args.fuzzy_threshold == 85
+
+    def test_all_flags_together(self):
+        """All flags set correctly when provided together."""
+        args = parse_args(
+            [
+                "--metadata",
+                "p.json",
+                "--debug",
+                "--subset-size",
+                "3",
+                "--fuzzy-threshold",
+                "85",
+            ]
+        )
+
+        assert args.metadata == "p.json"
+        assert args.debug is True
+        assert args.subset_size == 3
+        assert args.fuzzy_threshold == 85
 
 
 @pytest.fixture
@@ -624,9 +657,55 @@ class TestMain:
             "abstract_script.write_results_csv", lambda results, path: None
         )
 
-        main(["fake.json", "--debug"])
+        main(["--metadata", "fake.json", "--debug"])
 
         assert len(captured_records) == 5
+
+    def test_debug_subset_size_flag_overrides_default(self, tmp_path, monkeypatch):
+        """--subset-size 2 with --debug limits records to 2 instead of default 5."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("abstract_script.load_dotenv", lambda: None)
+        monkeypatch.setattr(
+            "abstract_script.load_metadata", lambda path: self._mock_records(10)
+        )
+
+        captured_records = []
+
+        def mock_enrich(records, session, oa_rate, s2_rate, threshold, skip_types):
+            captured_records.extend(records)
+            return [{"harvest_status": "ok"} for _ in records]
+
+        monkeypatch.setattr("abstract_script.enrich_records", mock_enrich)
+        monkeypatch.setattr(
+            "abstract_script.write_results_csv", lambda results, path: None
+        )
+
+        main(["--metadata", "fake.json", "--debug", "--subset-size", "2"])
+
+        assert len(captured_records) == 2
+
+    def test_fuzzy_threshold_flag_forwarded_to_enrich(self, tmp_path, monkeypatch):
+        """--fuzzy-threshold 85 is forwarded to enrich_records as threshold=85."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("abstract_script.load_dotenv", lambda: None)
+        monkeypatch.setattr(
+            "abstract_script.load_metadata", lambda path: self._mock_records(1)
+        )
+
+        captured_threshold = {}
+
+        def mock_enrich(records, session, oa_rate, s2_rate, threshold, skip_types):
+            captured_threshold["value"] = threshold
+            return [{"harvest_status": "ok"}]
+
+        monkeypatch.setattr("abstract_script.enrich_records", mock_enrich)
+        monkeypatch.setattr(
+            "abstract_script.write_results_csv", lambda results, path: None
+        )
+
+        main(["--metadata", "fake.json", "--fuzzy-threshold", "85"])
+
+        assert captured_threshold["value"] == 85
 
     def test_happy_path_calls_pipeline_in_order(self, tmp_path, monkeypatch):
         """main() calls load_metadata, enrich_records, write_results_csv in sequence."""
@@ -650,7 +729,7 @@ class TestMain:
         monkeypatch.setattr("abstract_script.enrich_records", mock_enrich)
         monkeypatch.setattr("abstract_script.write_results_csv", mock_write)
 
-        main(["fake.json"])
+        main(["--metadata", "fake.json"])
 
         assert call_order == ["load_metadata", "enrich_records", "write_results_csv"]
 
@@ -669,7 +748,7 @@ class TestMain:
             "abstract_script.write_results_csv", lambda results, path: None
         )
 
-        main(["fake.json"])
+        main(["--metadata", "fake.json"])
 
         c_dir = tmp_path / "C"
         assert c_dir.exists()
@@ -694,7 +773,7 @@ class TestMain:
             "abstract_script.write_results_csv", lambda results, path: None
         )
 
-        main(["fake.json"])
+        main(["--metadata", "fake.json"])
 
         c_dir = tmp_path / "C"
         subdirs = list(c_dir.iterdir())
@@ -707,7 +786,7 @@ class TestMain:
         monkeypatch.setattr("abstract_script.load_dotenv", lambda: None)
 
         with pytest.raises(SystemExit) as exc_info:
-            main(["nonexistent.json"])
+            main(["--metadata", "nonexistent.json"])
 
         assert "nonexistent.json" in str(exc_info.value)
 
@@ -733,7 +812,7 @@ class TestMain:
             "abstract_script.write_results_csv", lambda results, path: None
         )
 
-        main(["fake.json"])
+        main(["--metadata", "fake.json"])
 
         assert captured_rates["oa"] == 0.1
         assert captured_rates["s2"] == 1.0
@@ -760,7 +839,7 @@ class TestMain:
             "abstract_script.write_results_csv", lambda results, path: None
         )
 
-        main(["fake.json"])
+        main(["--metadata", "fake.json"])
 
         assert captured_rates["oa"] == 0.5
         assert captured_rates["s2"] == 2.0
