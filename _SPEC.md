@@ -347,7 +347,7 @@ FUZZY_THRESHOLD = 90
 Add to the `.env` setup section:
 ```
 # For abstract harvesting (abstract_script.py and ENRICH_ABSTRACTS mode)
-OPENALEX_API_KEY=your-key-here          # required, free at openalex.org (mailto= polite pool deprecated Feb 2026)
+OPENALEX_API_KEY=your-key-here          # recommended, free at openalex.org (unauthenticated still works but shares a rate-limit pool)
 SEMANTIC_SCHOLAR_API_KEY=               # optional, gives guaranteed individual rate allocation
 ```
 
@@ -363,7 +363,7 @@ Add note about pymongo/bson namespace conflict.
 
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
-| `OPENALEX_API_KEY` | Yes | `""` | API key for OpenAlex (free at openalex.org; `mailto=` polite pool deprecated Feb 2026) |
+| `OPENALEX_API_KEY` | Recommended | `""` | API key for OpenAlex (free at openalex.org). Unauthenticated requests work but share a 10k-credit/day pool; a key guarantees your own allocation. |
 | `SEMANTIC_SCHOLAR_API_KEY` | No | `""` | S2 API key (gives guaranteed 1 req/s individual allocation vs shared unauthenticated pool) |
 
 Existing `VERSO_API_KEY` unchanged. All loaded via `python-dotenv` (`load_dotenv()` at script startup).

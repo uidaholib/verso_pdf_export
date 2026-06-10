@@ -16,8 +16,15 @@ load_dotenv()
 
 # CONFIGURATION
 # API key for OpenAlex — free keys available at openalex.org.
-# The mailto= polite pool was deprecated Feb 2026; an API key is now required.
+# The mailto= polite pool was deprecated Feb 2026; a key is recommended but
+# unauthenticated requests still work (shared rate-limit pool, 10k credits/day).
 OPENALEX_API_KEY = os.getenv("OPENALEX_API_KEY", "")
+
+if not OPENALEX_API_KEY:
+    logging.getLogger(__name__).warning(
+        "OPENALEX_API_KEY not set — using unauthenticated shared rate-limit pool. "
+        "Get a free key at https://openalex.org to guarantee your own allocation."
+    )
 
 # Minimum interval (seconds) between API requests.
 # OpenAlex uses a credit-based system: singleton lookups = 1 credit,
