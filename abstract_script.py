@@ -1,15 +1,24 @@
 """Enrich VERSO metadata records with abstracts from external APIs."""
 
+import argparse
 import json
 import logging
+import os
+import sys
+from datetime import datetime
 
 import pandas as pd
 import requests
+from dotenv import load_dotenv
 from tqdm import tqdm
 
 from providers.harvester import try_providers
 
 logger = logging.getLogger(__name__)
+
+FUZZY_THRESHOLD = 90
+ASSET_TYPES_TO_SKIP = ["ETD-Doctoral", "ETD-Masters"]
+DEBUG_SUBSET_SIZE = 5
 
 
 def load_metadata(path: str) -> list[dict]:
@@ -196,3 +205,83 @@ def write_results_csv(results: list[dict], path: str) -> None:
         ],
     )
     df.to_csv(path, index=False, encoding="utf-8")
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse CLI arguments for the abstract harvesting script."""
+    parser = argparse.ArgumentParser(
+        description="Enrich VERSO metadata records with abstracts from external APIs."
+    )
+    parser.add_argument(
+        "metadata_path",
+        help="Path to asset_metadata.json file",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help=f"Limit processing to first {DEBUG_SUBSET_SIZE} records",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Orchestrate the full abstract enrichment pipeline."""
+    args = parse_args(argv)
+    load_dotenv()
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    os.makedirs(f"C/{timestamp}/", exist_ok=True)
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        handlers=[
+            logging.FileHandler(f"C/{timestamp}/logs.log"),
+        ],
+    )
+
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.WARNING)
+    console_handler.setFormatter(
+        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    )
+    logging.getLogger().addHandler(console_handler)
+
+    try:
+        records = load_metadata(args.metadata_path)
+    except ValueError as exc:
+        sys.exit(str(exc))
+
+    if args.debug:
+        records = records[:DEBUG_SUBSET_SIZE]
+        logger.info("DEBUG mode: processing first %d records", len(records))
+    else:
+        logger.info("Processing %d records", len(records))
+
+    session = requests.Session()
+
+    oa_rate = float(os.environ.get("OPENALEX_RATE_INTERVAL", "0.1"))
+    s2_rate = float(os.environ.get("S2_RATE_INTERVAL", "1.0"))
+
+    results = enrich_records(
+        records, session, oa_rate, s2_rate, FUZZY_THRESHOLD, ASSET_TYPES_TO_SKIP
+    )
+
+    write_results_csv(results, f"C/{timestamp}/abstract_metadata.csv")
+
+    enriched = sum(
+        1 for r in results if r["harvest_status"] in ("ok", "low_confidence")
+    )
+    skipped = sum(1 for r in results if r["harvest_status"].startswith("skipped"))
+    no_match = sum(1 for r in results if r["harvest_status"] == "no_match")
+    errors = sum(1 for r in results if r["harvest_status"] == "error")
+
+    print(f"Total processed: {len(results)}")
+    print(f"Enriched: {enriched}")
+    print(f"Skipped: {skipped}")
+    print(f"No match: {no_match}")
+    print(f"Errors: {errors}")
+
+
+if __name__ == "__main__":
+    main()

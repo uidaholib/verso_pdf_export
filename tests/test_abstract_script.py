@@ -1,7 +1,8 @@
-"""Tests for abstract_script.load_metadata() — JSON file loading and validation."""
+"""Tests for abstract_script — JSON loading, enrichment, and CLI orchestration."""
 
 import json
 import logging
+from datetime import datetime
 
 import pytest
 
@@ -11,6 +12,8 @@ from abstract_script import (
     enrich_records,
     extract_identifiers,
     load_metadata,
+    main,
+    parse_args,
     should_skip,
     write_results_csv,
 )
@@ -550,3 +553,214 @@ class TestWriteResultsCsv:
 
         df = pd.read_csv(csv_path)
         assert df.iloc[0]["abstract"] == tricky_abstract
+
+
+class TestParseArgs:
+    """Validate CLI argument parsing."""
+
+    def test_positional_metadata_path(self):
+        """Positional arg sets metadata_path, debug defaults to False."""
+        args = parse_args(["path/to/metadata.json"])
+
+        assert args.metadata_path == "path/to/metadata.json"
+        assert args.debug is False
+
+    def test_debug_flag(self):
+        """--debug flag sets debug to True."""
+        args = parse_args(["path.json", "--debug"])
+
+        assert args.debug is True
+
+    def test_no_args_raises_system_exit(self):
+        """Missing positional arg causes SystemExit."""
+        with pytest.raises(SystemExit):
+            parse_args([])
+
+
+@pytest.fixture
+def _reset_logging():
+    """Reset root logging handlers after tests that call main()."""
+    yield
+    root = logging.getLogger()
+    for handler in root.handlers[:]:
+        handler.close()
+        root.removeHandler(handler)
+    root.setLevel(logging.WARNING)
+
+
+@pytest.mark.usefixtures("_reset_logging")
+class TestMain:
+    """Validate the main() orchestration function."""
+
+    @staticmethod
+    def _mock_records(n=10):
+        """Generate n minimal record dicts."""
+        return [
+            {
+                "originalRepository": {"assetId": str(i)},
+                "identifier.doi": f"10.1/{i}",
+                "title": f"Paper {i}",
+                "resourceType": "journal_article",
+            }
+            for i in range(n)
+        ]
+
+    def test_debug_limits_records(self, tmp_path, monkeypatch):
+        """In --debug mode, only first 5 of 10 records are passed to enrich_records."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("abstract_script.load_dotenv", lambda: None)
+        monkeypatch.setattr(
+            "abstract_script.load_metadata", lambda path: self._mock_records(10)
+        )
+
+        captured_records = []
+
+        def mock_enrich(records, session, oa_rate, s2_rate, threshold, skip_types):
+            captured_records.extend(records)
+            return [{"harvest_status": "ok"} for _ in records]
+
+        monkeypatch.setattr("abstract_script.enrich_records", mock_enrich)
+        monkeypatch.setattr(
+            "abstract_script.write_results_csv", lambda results, path: None
+        )
+
+        main(["fake.json", "--debug"])
+
+        assert len(captured_records) == 5
+
+    def test_happy_path_calls_pipeline_in_order(self, tmp_path, monkeypatch):
+        """main() calls load_metadata, enrich_records, write_results_csv in sequence."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("abstract_script.load_dotenv", lambda: None)
+
+        call_order = []
+
+        def mock_load(path):
+            call_order.append("load_metadata")
+            return self._mock_records(2)
+
+        def mock_enrich(records, session, oa_rate, s2_rate, threshold, skip_types):
+            call_order.append("enrich_records")
+            return [{"harvest_status": "ok"} for _ in records]
+
+        def mock_write(results, path):
+            call_order.append("write_results_csv")
+
+        monkeypatch.setattr("abstract_script.load_metadata", mock_load)
+        monkeypatch.setattr("abstract_script.enrich_records", mock_enrich)
+        monkeypatch.setattr("abstract_script.write_results_csv", mock_write)
+
+        main(["fake.json"])
+
+        assert call_order == ["load_metadata", "enrich_records", "write_results_csv"]
+
+    def test_creates_timestamped_directory(self, tmp_path, monkeypatch):
+        """main() creates C/{timestamp}/ directory."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("abstract_script.load_dotenv", lambda: None)
+        monkeypatch.setattr(
+            "abstract_script.load_metadata", lambda path: self._mock_records(1)
+        )
+        monkeypatch.setattr(
+            "abstract_script.enrich_records",
+            lambda *args, **kwargs: [{"harvest_status": "ok"}],
+        )
+        monkeypatch.setattr(
+            "abstract_script.write_results_csv", lambda results, path: None
+        )
+
+        main(["fake.json"])
+
+        c_dir = tmp_path / "C"
+        assert c_dir.exists()
+        subdirs = list(c_dir.iterdir())
+        assert len(subdirs) == 1
+        # Check timestamp format YYYY-MM-DD_HH-MM-SS
+        dirname = subdirs[0].name
+        datetime.strptime(dirname, "%Y-%m-%d_%H-%M-%S")
+
+    def test_creates_log_file(self, tmp_path, monkeypatch):
+        """main() creates logs.log in the timestamped directory."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("abstract_script.load_dotenv", lambda: None)
+        monkeypatch.setattr(
+            "abstract_script.load_metadata", lambda path: self._mock_records(1)
+        )
+        monkeypatch.setattr(
+            "abstract_script.enrich_records",
+            lambda *args, **kwargs: [{"harvest_status": "ok"}],
+        )
+        monkeypatch.setattr(
+            "abstract_script.write_results_csv", lambda results, path: None
+        )
+
+        main(["fake.json"])
+
+        c_dir = tmp_path / "C"
+        subdirs = list(c_dir.iterdir())
+        log_file = subdirs[0] / "logs.log"
+        assert log_file.exists()
+
+    def test_bad_metadata_path_exits(self, tmp_path, monkeypatch):
+        """main() catches ValueError from load_metadata and calls sys.exit()."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("abstract_script.load_dotenv", lambda: None)
+
+        with pytest.raises(SystemExit) as exc_info:
+            main(["nonexistent.json"])
+
+        assert "nonexistent.json" in str(exc_info.value)
+
+    def test_default_rate_intervals(self, tmp_path, monkeypatch):
+        """Without env vars, defaults 0.1 and 1.0 are passed to enrich_records."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("abstract_script.load_dotenv", lambda: None)
+        monkeypatch.setattr(
+            "abstract_script.load_metadata", lambda path: self._mock_records(1)
+        )
+        monkeypatch.delenv("OPENALEX_RATE_INTERVAL", raising=False)
+        monkeypatch.delenv("S2_RATE_INTERVAL", raising=False)
+
+        captured_rates = {}
+
+        def mock_enrich(records, session, oa_rate, s2_rate, threshold, skip_types):
+            captured_rates["oa"] = oa_rate
+            captured_rates["s2"] = s2_rate
+            return [{"harvest_status": "ok"}]
+
+        monkeypatch.setattr("abstract_script.enrich_records", mock_enrich)
+        monkeypatch.setattr(
+            "abstract_script.write_results_csv", lambda results, path: None
+        )
+
+        main(["fake.json"])
+
+        assert captured_rates["oa"] == 0.1
+        assert captured_rates["s2"] == 1.0
+
+    def test_custom_rate_intervals_from_env(self, tmp_path, monkeypatch):
+        """Custom env vars are passed as floats to enrich_records."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("abstract_script.load_dotenv", lambda: None)
+        monkeypatch.setattr(
+            "abstract_script.load_metadata", lambda path: self._mock_records(1)
+        )
+        monkeypatch.setenv("OPENALEX_RATE_INTERVAL", "0.5")
+        monkeypatch.setenv("S2_RATE_INTERVAL", "2.0")
+
+        captured_rates = {}
+
+        def mock_enrich(records, session, oa_rate, s2_rate, threshold, skip_types):
+            captured_rates["oa"] = oa_rate
+            captured_rates["s2"] = s2_rate
+            return [{"harvest_status": "ok"}]
+
+        monkeypatch.setattr("abstract_script.enrich_records", mock_enrich)
+        monkeypatch.setattr(
+            "abstract_script.write_results_csv", lambda results, path: None
+        )
+
+        main(["fake.json"])
+
+        assert captured_rates["oa"] == 0.5
+        assert captured_rates["s2"] == 2.0
