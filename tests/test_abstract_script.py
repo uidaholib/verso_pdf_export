@@ -5,7 +5,7 @@ import logging
 
 import pytest
 
-from abstract_script import extract_identifiers, load_metadata
+from abstract_script import extract_identifiers, load_metadata, should_skip
 
 
 class TestLoadMetadata:
@@ -148,3 +148,60 @@ class TestExtractIdentifiers:
             "A Sample Research Paper Title",
             "journal_article",
         )
+
+
+class TestShouldSkip:
+    """Validate that should_skip gates enrichment for records with abstracts or skipped types."""
+
+    SKIP_TYPES = ["ETD-Doctoral", "ETD-Masters"]
+
+    def test_record_with_abstract_is_skipped(self):
+        """A record that already has a non-empty abstract should be skipped."""
+        record = {"description.abstract": [{"value": "Some text"}]}
+
+        assert should_skip(record, self.SKIP_TYPES) is True
+
+    def test_empty_abstract_list_is_not_skipped(self):
+        """An empty abstract list means no abstract — don't skip."""
+        record = {"description.abstract": [], "resourceType": "journal_article"}
+
+        assert should_skip(record, self.SKIP_TYPES) is False
+
+    def test_empty_value_string_is_not_skipped(self):
+        """An abstract entry with an empty string value is not a real abstract."""
+        record = {
+            "description.abstract": [{"value": ""}],
+            "resourceType": "journal_article",
+        }
+
+        assert should_skip(record, self.SKIP_TYPES) is False
+
+    def test_missing_value_key_is_not_skipped(self):
+        """An abstract entry without a 'value' key has no usable abstract."""
+        record = {"description.abstract": [{}], "resourceType": "journal_article"}
+
+        assert should_skip(record, self.SKIP_TYPES) is False
+
+    def test_no_abstract_key_is_not_skipped(self):
+        """A record with no 'description.abstract' key at all is not skipped."""
+        record = {"resourceType": "journal_article"}
+
+        assert should_skip(record, self.SKIP_TYPES) is False
+
+    def test_etd_doctoral_type_is_skipped(self):
+        """ETD-Doctoral is in skip_types, so it should be skipped."""
+        record = {"resourceType": "ETD-Doctoral"}
+
+        assert should_skip(record, self.SKIP_TYPES) is True
+
+    def test_etd_masters_type_is_skipped(self):
+        """ETD-Masters is in skip_types, so it should be skipped."""
+        record = {"resourceType": "ETD-Masters"}
+
+        assert should_skip(record, self.SKIP_TYPES) is True
+
+    def test_journal_article_without_abstract_is_not_skipped(self):
+        """A journal_article with no abstract should not be skipped."""
+        record = {"resourceType": "journal_article"}
+
+        assert should_skip(record, self.SKIP_TYPES) is False

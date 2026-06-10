@@ -58,3 +58,20 @@ def extract_identifiers(record: dict) -> tuple[str, str, str, str]:
     title = record.get("title", "")
     asset_type = record.get("resourceType", "")
     return (asset_id, doi, title, asset_type)
+
+
+def should_skip(record: dict, skip_types: list[str]) -> bool:
+    """Decide whether a record should be skipped during abstract enrichment.
+
+    Skips when the record already has a usable abstract (non-empty string in the
+    first element's "value" key) or when its resourceType is in skip_types
+    (e.g., ETDs that external APIs won't index).
+    """
+    abstracts = record.get("description.abstract", [])
+    if abstracts and abstracts[0].get("value", ""):
+        return True
+
+    if record.get("resourceType", "") in skip_types:
+        return True
+
+    return False
