@@ -5,11 +5,14 @@ import logging
 
 import pytest
 
+import pandas as pd
+
 from abstract_script import (
     enrich_records,
     extract_identifiers,
     load_metadata,
     should_skip,
+    write_results_csv,
 )
 
 
@@ -469,3 +472,81 @@ class TestEnrichRecords:
         assert results[0]["harvest_status"] == "error"
         assert results[1]["harvest_status"] == "ok"
         assert "Unexpected error" in caplog.text
+
+
+class TestWriteResultsCsv:
+    """Tests for write_results_csv() — CSV serialization of enrichment results."""
+
+    def _make_result(self, **overrides):
+        """Build a result dict with sensible defaults, applying any overrides."""
+        base = {
+            "asset_id": "123",
+            "doi": "10.1234/test",
+            "title": "Test Title",
+            "abstract": "Some abstract text",
+            "abstract_source": "openalex",
+            "abstract_external_id": "W123",
+            "harvest_status": "ok",
+            "trace": ["oa_doi=hit"],
+        }
+        base.update(overrides)
+        return base
+
+    def test_creates_csv_at_path(self, tmp_path):
+        csv_path = tmp_path / "results.csv"
+        write_results_csv([self._make_result()], str(csv_path))
+
+        assert csv_path.exists()
+
+    def test_csv_has_expected_headers(self, tmp_path):
+        csv_path = tmp_path / "results.csv"
+        write_results_csv([self._make_result()], str(csv_path))
+
+        df = pd.read_csv(csv_path)
+        expected_columns = [
+            "asset_id",
+            "doi",
+            "title",
+            "abstract",
+            "abstract_source",
+            "abstract_external_id",
+            "harvest_status",
+            "trace",
+        ]
+        assert list(df.columns) == expected_columns
+
+    def test_none_abstract_becomes_empty_string(self, tmp_path):
+        csv_path = tmp_path / "results.csv"
+        write_results_csv([self._make_result(abstract=None)], str(csv_path))
+
+        df = pd.read_csv(csv_path, keep_default_na=False)
+        assert df.iloc[0]["abstract"] == ""
+
+    def test_trace_list_serialized_with_semicolons(self, tmp_path):
+        csv_path = tmp_path / "results.csv"
+        write_results_csv(
+            [self._make_result(trace=["oa_doi=miss", "s2_doi=hit"])],
+            str(csv_path),
+        )
+
+        df = pd.read_csv(csv_path)
+        assert df.iloc[0]["trace"] == "oa_doi=miss;s2_doi=hit"
+
+    def test_empty_results_creates_header_only_csv(self, tmp_path):
+        csv_path = tmp_path / "results.csv"
+        write_results_csv([], str(csv_path))
+
+        df = pd.read_csv(csv_path)
+        assert len(df) == 0
+        assert "asset_id" in df.columns
+
+    def test_abstract_with_commas_and_newlines_escaped(self, tmp_path):
+        csv_path = tmp_path / "results.csv"
+        tricky_abstract = "Results show that, surprisingly,\nnewlines appear."
+        write_results_csv(
+            [self._make_result(abstract=tricky_abstract)],
+            str(csv_path),
+        )
+
+        df = pd.read_csv(csv_path)
+        assert df.iloc[0]["abstract"] == tricky_abstract

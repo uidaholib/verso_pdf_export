@@ -3,6 +3,7 @@
 import json
 import logging
 
+import pandas as pd
 import requests
 from tqdm import tqdm
 
@@ -162,3 +163,36 @@ def enrich_records(
             results.append(_make_result(harvest_status="error"))
 
     return results
+
+
+def write_results_csv(results: list[dict], path: str) -> None:
+    """Serialize enrichment results to CSV for review or downstream import.
+
+    Trace lists are joined with semicolons so each row stays on one line,
+    and None values become empty strings so the CSV never contains literal
+    'None' text.
+    """
+    rows = []
+    for r in results:
+        row = dict(r)
+        trace = row.get("trace")
+        row["trace"] = ";".join(trace) if isinstance(trace, list) else (trace or "")
+        for key, value in row.items():
+            if value is None:
+                row[key] = ""
+        rows.append(row)
+
+    df = pd.DataFrame(
+        rows,
+        columns=[
+            "asset_id",
+            "doi",
+            "title",
+            "abstract",
+            "abstract_source",
+            "abstract_external_id",
+            "harvest_status",
+            "trace",
+        ],
+    )
+    df.to_csv(path, index=False, encoding="utf-8")
