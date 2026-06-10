@@ -173,14 +173,18 @@ def generate_file_tasks(final_output):
     return file_tasks
 
 
-def generate_metadata_csv(file_tasks, final_output):
+def generate_metadata_csv(
+    file_tasks, final_output, enrichment_results=None, output_dir="B"
+):
     """
-    Generate a CSV in folder B containing metadata for each PDF file.
-    """
-    logger.info("Generating metadata CSV in folder B")
+    Generate a CSV in the output directory containing metadata for each PDF file.
 
-    # Create folder B
-    os.makedirs("B", exist_ok=True)
+    When enrichment_results is provided, its abstract/source/ID values are
+    written into three extra columns; otherwise those columns are empty.
+    """
+    logger.info(f"Generating metadata CSV in folder {output_dir}")
+
+    os.makedirs(output_dir, exist_ok=True)
 
     # Build lookup dictionary for records by assetId
     record_lookup = {}
@@ -263,11 +267,50 @@ def generate_metadata_csv(file_tasks, final_output):
             "wos_id": record.get("identifier.wos", ""),
             "download_url": task["url"],
         }
+
+        # Enrichment columns — always present, empty when enrichment is off
+        enrichment = (enrichment_results or {}).get(str(asset_id), {})
+        row["abstract"] = enrichment.get("abstract", "")
+        row["abstract_source"] = enrichment.get("abstract_source", "")
+        row["abstract_external_id"] = enrichment.get("abstract_external_id", "")
+
         metadata_rows.append(row)
 
-    # Create DataFrame and save to CSV
-    metadata_df = pd.DataFrame(metadata_rows)
-    metadata_csv_path = "B/pdf_metadata.csv"
+    # Create DataFrame with explicit column order so the 3 enrichment
+    # columns always appear last, even when all values are empty.
+    columns = [
+        "filename",
+        "asset_id",
+        "original_filename",
+        "file_name_in_record",
+        "file_number",
+        "file_order",
+        "file_creation_date",
+        "file_size_bytes",
+        "title",
+        "description",
+        "creators",
+        "publisher",
+        "publication_date",
+        "displayed_date",
+        "language",
+        "external_id",
+        "barcode",
+        "pivot_id",
+        "inst_id",
+        "other_id",
+        "alma_user_id",
+        "user_primary_id",
+        "doi",
+        "uri",
+        "wos_id",
+        "download_url",
+        "abstract",
+        "abstract_source",
+        "abstract_external_id",
+    ]
+    metadata_df = pd.DataFrame(metadata_rows, columns=columns)
+    metadata_csv_path = os.path.join(output_dir, "pdf_metadata.csv")
     metadata_df.to_csv(metadata_csv_path, index=False, encoding="utf-8")
 
     logger.info(

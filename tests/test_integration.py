@@ -293,3 +293,77 @@ class TestGenerateMetadataCsvEnrichment:
         assert row["abstract"] == "Found via str conversion."
         assert row["abstract_source"] == "semantic_scholar"
         assert row["abstract_external_id"] == "SS:123"
+
+
+class TestMdScriptGenerateMetadataCsvEnrichment:
+    """Tests for the enrichment and output_dir extensions to md_script.generate_metadata_csv."""
+
+    def test_no_enrichment_produces_29_columns_with_empty_enrichment(
+        self, tmp_path, sample_file_task, sample_final_output
+    ):
+        """enrichment_results=None produces 29 columns with the last 3 empty."""
+        import md_script
+
+        md_script.generate_metadata_csv(
+            [sample_file_task], sample_final_output, output_dir=str(tmp_path)
+        )
+        df = _read_csv(tmp_path)
+
+        assert len(df.columns) == EXPECTED_COLUMNS
+        assert list(df.columns[-3:]) == ENRICHMENT_COLS
+        row = df.iloc[0]
+        for col in ENRICHMENT_COLS:
+            assert pd.isna(row[col]) or row[col] == ""
+
+    def test_matching_enrichment_populates_columns(
+        self, tmp_path, sample_file_task, sample_final_output
+    ):
+        """enrichment entry keyed to the asset_id populates the 3 new columns."""
+        import md_script
+
+        enrichment = {
+            "12345678": {
+                "abstract": "Enriched abstract text.",
+                "abstract_source": "crossref",
+                "abstract_external_id": "10.1234/example.2023",
+            }
+        }
+        md_script.generate_metadata_csv(
+            [sample_file_task],
+            sample_final_output,
+            enrichment_results=enrichment,
+            output_dir=str(tmp_path),
+        )
+        df = _read_csv(tmp_path)
+        row = df.iloc[0]
+
+        assert row["abstract"] == "Enriched abstract text."
+        assert row["abstract_source"] == "crossref"
+        assert row["abstract_external_id"] == "10.1234/example.2023"
+
+    def test_asset_id_int_str_mismatch_resolved(
+        self, tmp_path, sample_file_task, sample_final_output
+    ):
+        """asset_id is int in the task but str key in enrichment_results.
+        The str() conversion in the lookup must bridge the mismatch."""
+        import md_script
+
+        enrichment = {
+            "12345678": {
+                "abstract": "Found via str conversion.",
+                "abstract_source": "semantic_scholar",
+                "abstract_external_id": "SS:123",
+            }
+        }
+        md_script.generate_metadata_csv(
+            [sample_file_task],
+            sample_final_output,
+            enrichment_results=enrichment,
+            output_dir=str(tmp_path),
+        )
+        df = _read_csv(tmp_path)
+        row = df.iloc[0]
+
+        assert row["abstract"] == "Found via str conversion."
+        assert row["abstract_source"] == "semantic_scholar"
+        assert row["abstract_external_id"] == "SS:123"
