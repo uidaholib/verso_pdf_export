@@ -1,5 +1,6 @@
 """Import pre-harvested abstracts from a Universo MongoDB BSON export."""
 
+import json
 import logging
 import os
 
@@ -45,6 +46,39 @@ def parse_bson_abstracts(filepath: str) -> list[dict]:
 
     if doc_count == 0:
         logger.warning("BSON file contains 0 documents: %s", filepath)
+
+    return results
+
+
+def load_verso_records(path: str) -> list[dict]:
+    """Read a VERSO asset_metadata.json and return flat record dicts.
+
+    Each record is reduced to three fields (asset_id, doi, title) because
+    downstream matching only needs these — the full Esploro record shape
+    used by abstract_script.load_metadata is not needed here.
+    """
+    try:
+        with open(path) as f:
+            raw = f.read()
+    except FileNotFoundError:
+        raise ValueError(f"metadata file not found: {path}")
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON in {path}: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise ValueError(f"expected a JSON object in {path}, got {type(data).__name__}")
+    if "records" not in data:
+        raise ValueError(f"missing 'records' key in {path}")
+
+    results: list[dict] = []
+    for record in data["records"]:
+        asset_id = str(record.get("originalRepository", {}).get("assetId", ""))
+        doi = (record.get("identifier.doi", "") or "").strip().lower()
+        title = record.get("title", "") or ""
+        results.append({"asset_id": asset_id, "doi": doi, "title": title})
 
     return results
 

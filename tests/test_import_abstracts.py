@@ -1,10 +1,11 @@
 """Tests for import_abstracts — Phase 3."""
 
+import json
 import logging
 
 import pytest
 
-from import_abstracts import build_doi_index, parse_bson_abstracts
+from import_abstracts import build_doi_index, load_verso_records, parse_bson_abstracts
 
 
 class TestParseBsonAbstracts:
@@ -230,3 +231,127 @@ class TestBuildDoiIndex:
     # 6. Empty list returns empty dict
     def test_empty_list_returns_empty_dict(self):
         assert build_doi_index([]) == {}
+
+
+def _write_metadata(tmp_path, records, total_count=None):
+    """Write a minimal asset_metadata.json to tmp_path and return its path."""
+    data = {
+        "totalRecordCount": len(records) if total_count is None else total_count,
+        "records": records,
+    }
+    path = tmp_path / "asset_metadata.json"
+    path.write_text(json.dumps(data))
+    return str(path)
+
+
+class TestLoadVersoRecords:
+    """Tests for load_verso_records()."""
+
+    # 1. Valid file with 3 records returns 3 dicts with expected keys
+    def test_valid_three_records(self, tmp_path):
+        records = [
+            {
+                "originalRepository": {"assetId": 111},
+                "identifier.doi": "10.1/a",
+                "title": "Title A",
+            },
+            {
+                "originalRepository": {"assetId": 222},
+                "identifier.doi": "10.2/b",
+                "title": "Title B",
+            },
+            {
+                "originalRepository": {"assetId": 333},
+                "identifier.doi": "10.3/c",
+                "title": "Title C",
+            },
+        ]
+        path = _write_metadata(tmp_path, records)
+        result = load_verso_records(path)
+        assert len(result) == 3
+        assert all(set(r.keys()) == {"asset_id", "doi", "title"} for r in result)
+        assert result[0] == {"asset_id": "111", "doi": "10.1/a", "title": "Title A"}
+        assert result[1] == {"asset_id": "222", "doi": "10.2/b", "title": "Title B"}
+        assert result[2] == {"asset_id": "333", "doi": "10.3/c", "title": "Title C"}
+
+    # 2. Nonexistent file raises ValueError
+    def test_nonexistent_file_raises_valueerror(self):
+        with pytest.raises(ValueError, match="nonexistent.json"):
+            load_verso_records("nonexistent.json")
+
+    # 3. Invalid JSON raises ValueError
+    def test_invalid_json_raises_valueerror(self, tmp_path):
+        path = tmp_path / "bad.json"
+        path.write_text("{not valid json")
+        with pytest.raises(ValueError, match="invalid JSON"):
+            load_verso_records(str(path))
+
+    # 4. Missing 'records' key raises ValueError
+    def test_missing_records_key_raises_valueerror(self, tmp_path):
+        path = tmp_path / "no_records.json"
+        path.write_text(json.dumps({"totalRecordCount": 0}))
+        with pytest.raises(ValueError, match="missing 'records' key"):
+            load_verso_records(str(path))
+
+    # 5. Record with no DOI returns doi=""
+    def test_no_doi_defaults_to_empty_string(self, tmp_path):
+        records = [
+            {
+                "originalRepository": {"assetId": 111},
+                "title": "No DOI",
+            },
+        ]
+        path = _write_metadata(tmp_path, records)
+        result = load_verso_records(path)
+        assert result[0]["doi"] == ""
+
+    # 6. Integer assetId converted to string
+    def test_int_asset_id_converted_to_string(self, tmp_path):
+        records = [
+            {
+                "originalRepository": {"assetId": 12345678},
+                "identifier.doi": "10.1/a",
+                "title": "T",
+            },
+        ]
+        path = _write_metadata(tmp_path, records)
+        result = load_verso_records(path)
+        assert result[0]["asset_id"] == "12345678"
+        assert isinstance(result[0]["asset_id"], str)
+
+    # 7. DOI normalized to lowercase and stripped
+    def test_doi_normalized_lowercase_stripped(self, tmp_path):
+        records = [
+            {
+                "originalRepository": {"assetId": 1},
+                "identifier.doi": "  10.1234/ABC.Def  ",
+                "title": "T",
+            },
+        ]
+        path = _write_metadata(tmp_path, records)
+        result = load_verso_records(path)
+        assert result[0]["doi"] == "10.1234/abc.def"
+
+    # 8. Missing originalRepository key -> asset_id=""
+    def test_missing_original_repository_defaults_to_empty(self, tmp_path):
+        records = [
+            {
+                "identifier.doi": "10.1/a",
+                "title": "No repo",
+            },
+        ]
+        path = _write_metadata(tmp_path, records)
+        result = load_verso_records(path)
+        assert result[0]["asset_id"] == ""
+
+    # 9. Missing title key -> title=""
+    def test_missing_title_defaults_to_empty(self, tmp_path):
+        records = [
+            {
+                "originalRepository": {"assetId": 1},
+                "identifier.doi": "10.1/a",
+            },
+        ]
+        path = _write_metadata(tmp_path, records)
+        result = load_verso_records(path)
+        assert result[0]["title"] == ""
