@@ -11,6 +11,7 @@ dist/
 .mypy_cache/
 .ruff_cache/
 .claude/
+*universo_export/
 
 # WSL/sandbox artifacts
 .bashrc
