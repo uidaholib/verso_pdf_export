@@ -10,9 +10,14 @@ from datetime import datetime
 from dotenv import load_dotenv
 from tqdm import tqdm
 
+from providers.enrich import enrich_final_output
+
 # CONFIGURATION
 CSV_FILENAME = "assetsWithPDFs_just_ETDs.csv"
 DF_SUBSET_SIZE = 5  # Number of records to process in debug mode
+ENRICH_ABSTRACTS = False
+ASSET_TYPES_TO_SKIP = ["ETD-Doctoral", "ETD-Masters"]
+FUZZY_THRESHOLD = 90
 errors: list[dict[str, str] | str] = []
 
 logger = logging.getLogger(__name__)
@@ -389,6 +394,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DF_SUBSET_SIZE,
         help=f"Number of records to process in debug mode (default: {DF_SUBSET_SIZE})",
     )
+    parser.add_argument(
+        "--enrich-abstracts",
+        action="store_true",
+        default=False,
+        help="Enrich records with abstracts from OpenAlex/Semantic Scholar",
+    )
+    parser.add_argument(
+        "--fuzzy-threshold",
+        type=int,
+        default=FUZZY_THRESHOLD,
+        help=f"Minimum fuzzy-match score for title matching (default: {FUZZY_THRESHOLD})",
+    )
     return parser.parse_args(argv)
 
 
@@ -418,8 +435,25 @@ def main(argv: list[str] | None = None) -> None:
 
     df = load_data(args.csv)
     final_output = make_api_calls(df, timestamp, args.debug, args.subset_size)
+
+    enrichment_results = {}
+    if args.enrich_abstracts:
+        oa_rate = float(os.getenv("OPENALEX_RATE_INTERVAL", "0.1"))
+        s2_rate = float(os.getenv("S2_RATE_INTERVAL", "1.0"))
+        with requests.Session() as session:
+            enrichment_results = enrich_final_output(
+                final_output["records"],
+                session,
+                oa_rate,
+                s2_rate,
+                args.fuzzy_threshold,
+                ASSET_TYPES_TO_SKIP,
+            )
+
     file_tasks = download_asset_files(final_output)
-    generate_metadata_csv(file_tasks, final_output)
+    generate_metadata_csv(
+        file_tasks, final_output, enrichment_results=enrichment_results
+    )
 
 
 if __name__ == "__main__":
