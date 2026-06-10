@@ -5,7 +5,7 @@ import logging
 
 import pytest
 
-from abstract_script import load_metadata
+from abstract_script import extract_identifiers, load_metadata
 
 
 class TestLoadMetadata:
@@ -71,3 +71,80 @@ class TestLoadMetadata:
 
         with pytest.raises(ValueError, match="records"):
             load_metadata(str(path))
+
+
+class TestExtractIdentifiers:
+    """Validate that extract_identifiers pulls the four key fields from an Esploro record."""
+
+    def test_full_record_returns_all_fields(self, sample_esploro_record):
+        """A complete record returns (asset_id_str, doi, title, resource_type)."""
+        result = extract_identifiers(sample_esploro_record)
+
+        assert result == (
+            "12345678",
+            "10.1234/example.2023",
+            "A Sample Research Paper Title",
+            "journal_article",
+        )
+
+    def test_missing_doi_returns_empty_string(self, sample_esploro_record):
+        """When 'identifier.doi' is absent, doi slot is empty string."""
+        del sample_esploro_record["identifier.doi"]
+
+        result = extract_identifiers(sample_esploro_record)
+
+        assert result == (
+            "12345678",
+            "",
+            "A Sample Research Paper Title",
+            "journal_article",
+        )
+
+    def test_missing_title_returns_empty_string(self, sample_esploro_record):
+        """When 'title' is absent, title slot is empty string."""
+        del sample_esploro_record["title"]
+
+        result = extract_identifiers(sample_esploro_record)
+
+        assert result == ("12345678", "10.1234/example.2023", "", "journal_article")
+
+    def test_missing_resource_type_returns_empty_string(self, sample_esploro_record):
+        """When 'resourceType' is absent, type slot is empty string."""
+        del sample_esploro_record["resourceType"]
+
+        result = extract_identifiers(sample_esploro_record)
+
+        assert result == (
+            "12345678",
+            "10.1234/example.2023",
+            "A Sample Research Paper Title",
+            "",
+        )
+
+    def test_missing_original_repository_returns_empty_asset_id(
+        self, sample_esploro_record
+    ):
+        """When 'originalRepository' is absent entirely, asset_id slot is empty string."""
+        del sample_esploro_record["originalRepository"]
+
+        result = extract_identifiers(sample_esploro_record)
+
+        assert result == (
+            "",
+            "10.1234/example.2023",
+            "A Sample Research Paper Title",
+            "journal_article",
+        )
+
+    def test_string_asset_id_returned_as_is(self, sample_esploro_record):
+        """When assetId is already a string, no double conversion occurs."""
+        sample_esploro_record["originalRepository"]["assetId"] = "99999999"
+
+        result = extract_identifiers(sample_esploro_record)
+
+        assert result == (
+            "99999999",
+            "10.1234/example.2023",
+            "A Sample Research Paper Title",
+            "journal_article",
+        )

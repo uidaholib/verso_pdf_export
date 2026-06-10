@@ -45,3 +45,16 @@ def load_metadata(path: str) -> list[dict]:
         )
 
     return records
+
+
+def extract_identifiers(record: dict) -> tuple[str, str, str, str]:
+    """Pull the four key identifiers used by downstream enrichment providers.
+
+    Returns (asset_id, doi, title, asset_type).  assetId lives inside the
+    nested 'originalRepository' dict and may be an int, so we convert to str.
+    """
+    asset_id = str(record.get("originalRepository", {}).get("assetId", ""))
+    doi = record.get("identifier.doi", "")
+    title = record.get("title", "")
+    asset_type = record.get("resourceType", "")
+    return (asset_id, doi, title, asset_type)
