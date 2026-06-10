@@ -1,8 +1,11 @@
 """Import pre-harvested abstracts from a Universo MongoDB BSON export."""
 
+import argparse
 import json
 import logging
 import os
+import sys
+from datetime import datetime
 
 import bson
 import pandas as pd
@@ -12,6 +15,8 @@ from tqdm import tqdm
 from providers.harvester import title_match_score
 
 logger = logging.getLogger(__name__)
+
+FUZZY_THRESHOLD = 90
 
 
 def parse_bson_abstracts(filepath: str) -> list[dict]:
@@ -215,3 +220,79 @@ def write_import_csv(matches: list[dict], path: str) -> None:
         ],
     )
     df.to_csv(path, index=False, encoding="utf-8")
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse CLI arguments for the abstract import script."""
+    parser = argparse.ArgumentParser(
+        description="Match pre-harvested abstracts from a Universo BSON export to VERSO metadata records."
+    )
+    parser.add_argument(
+        "bson_path",
+        help="Path to multi-document BSON export file",
+    )
+    parser.add_argument(
+        "metadata_path",
+        help="Path to asset_metadata.json file",
+    )
+    parser.add_argument(
+        "--threshold",
+        type=int,
+        default=FUZZY_THRESHOLD,
+        help=f"Minimum fuzzy title match score (default: {FUZZY_THRESHOLD})",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Orchestrate the full abstract import pipeline."""
+    args = parse_args(argv)
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    os.makedirs(f"C/{timestamp}/", exist_ok=True)
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        handlers=[
+            logging.FileHandler(f"C/{timestamp}/logs.log"),
+        ],
+    )
+
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.WARNING)
+    console_handler.setFormatter(
+        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    )
+    logging.getLogger().addHandler(console_handler)
+
+    try:
+        bson_docs = parse_bson_abstracts(args.bson_path)
+    except ValueError as exc:
+        sys.exit(str(exc))
+
+    logger.info("Parsed %d BSON docs with abstracts", len(bson_docs))
+
+    try:
+        verso_records = load_verso_records(args.metadata_path)
+    except ValueError as exc:
+        sys.exit(str(exc))
+
+    logger.info("Loaded %d VERSO records", len(verso_records))
+
+    matches = match_records(bson_docs, verso_records, args.threshold)
+
+    write_import_csv(matches, f"C/{timestamp}/imported_abstracts.csv")
+
+    doi_matched = sum(1 for m in matches if m["match_method"] == "doi")
+    title_matched = sum(1 for m in matches if m["match_method"] == "title")
+    unmatched = len(verso_records) - len(matches)
+
+    print(f"Total BSON docs with abstracts: {len(bson_docs)}")
+    print(f"Total VERSO records: {len(verso_records)}")
+    print(f"Matched: {len(matches)} (DOI: {doi_matched}, title: {title_matched})")
+    print(f"Unmatched: {unmatched}")
+
+
+if __name__ == "__main__":
+    main()

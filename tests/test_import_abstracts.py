@@ -2,6 +2,7 @@
 
 import json
 import logging
+from datetime import datetime
 
 import pytest
 
@@ -12,7 +13,9 @@ import pandas as pd
 from import_abstracts import (
     build_doi_index,
     load_verso_records,
+    main,
     match_records,
+    parse_args,
     parse_bson_abstracts,
     write_import_csv,
 )
@@ -584,3 +587,211 @@ class TestWriteImportCsv:
         df = pd.read_csv(path, keep_default_na=False)
         assert df.iloc[0]["abstract_external_id"] == ""
         assert df.iloc[0]["verso_doi"] == ""
+
+
+class TestParseArgs:
+    """Tests for parse_args()."""
+
+    def test_positional_args_and_default_threshold(self):
+        args = parse_args(["data.bson", "meta.json"])
+        assert args.bson_path == "data.bson"
+        assert args.metadata_path == "meta.json"
+        assert args.threshold == 90
+
+    def test_missing_metadata_path_raises_system_exit(self):
+        with pytest.raises(SystemExit):
+            parse_args(["data.bson"])
+
+    def test_no_args_raises_system_exit(self):
+        with pytest.raises(SystemExit):
+            parse_args([])
+
+    def test_custom_threshold(self):
+        args = parse_args(["a.bson", "b.json", "--threshold", "85"])
+        assert args.threshold == 85
+
+
+@pytest.fixture
+def _reset_logging():
+    """Reset root logging handlers after tests that call main()."""
+    yield
+    root = logging.getLogger()
+    for handler in root.handlers[:]:
+        handler.close()
+        root.removeHandler(handler)
+    root.setLevel(logging.WARNING)
+
+
+@pytest.mark.usefixtures("_reset_logging")
+class TestMain:
+    """Tests for main() orchestration."""
+
+    @staticmethod
+    def _fake_bson_docs():
+        return [
+            {
+                "abstract": "A",
+                "abstract_source": "s2",
+                "abstract_external_id": "",
+                "identifier_doi": "10.1/a",
+                "title": "T",
+            }
+        ]
+
+    @staticmethod
+    def _fake_verso_records():
+        return [{"asset_id": "1", "doi": "10.1/a", "title": "T"}]
+
+    @staticmethod
+    def _fake_matches():
+        return [
+            {
+                "asset_id": "1",
+                "verso_doi": "10.1/a",
+                "verso_title": "T",
+                "abstract": "A",
+                "abstract_source": "s2",
+                "abstract_external_id": "",
+                "match_method": "doi",
+                "match_score": 100.0,
+            }
+        ]
+
+    def _mock_all(self, monkeypatch, call_order=None):
+        """Wire up all mocks for a happy-path main() run."""
+        if call_order is None:
+            call_order = []
+
+        def mock_parse(path):
+            call_order.append("parse_bson_abstracts")
+            return self._fake_bson_docs()
+
+        def mock_load(path):
+            call_order.append("load_verso_records")
+            return self._fake_verso_records()
+
+        def mock_match(bson_docs, verso_records, threshold):
+            call_order.append("match_records")
+            return self._fake_matches()
+
+        def mock_write(matches, path):
+            call_order.append("write_import_csv")
+
+        monkeypatch.setattr("import_abstracts.parse_bson_abstracts", mock_parse)
+        monkeypatch.setattr("import_abstracts.load_verso_records", mock_load)
+        monkeypatch.setattr("import_abstracts.match_records", mock_match)
+        monkeypatch.setattr("import_abstracts.write_import_csv", mock_write)
+
+    def test_happy_path_calls_pipeline_in_order(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        call_order = []
+        self._mock_all(monkeypatch, call_order)
+
+        main(["fake.bson", "fake.json"])
+
+        assert call_order == [
+            "parse_bson_abstracts",
+            "load_verso_records",
+            "match_records",
+            "write_import_csv",
+        ]
+
+    def test_bad_bson_path_exits(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        # Don't mock parse_bson_abstracts — let it raise on missing file
+        monkeypatch.setattr(
+            "import_abstracts.load_verso_records", lambda p: self._fake_verso_records()
+        )
+        monkeypatch.setattr(
+            "import_abstracts.match_records", lambda *a: self._fake_matches()
+        )
+        monkeypatch.setattr("import_abstracts.write_import_csv", lambda *a: None)
+
+        with pytest.raises(SystemExit, match="nonexistent.bson"):
+            main(["nonexistent.bson", "fake.json"])
+
+    def test_bad_metadata_path_exits(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            "import_abstracts.parse_bson_abstracts", lambda p: self._fake_bson_docs()
+        )
+        # Don't mock load_verso_records — let it raise on missing file
+
+        with pytest.raises(SystemExit, match="nonexistent.json"):
+            main(["fake.bson", "nonexistent.json"])
+
+    def test_creates_timestamped_directory(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        self._mock_all(monkeypatch)
+
+        main(["fake.bson", "fake.json"])
+
+        c_dir = tmp_path / "C"
+        assert c_dir.exists()
+        subdirs = list(c_dir.iterdir())
+        assert len(subdirs) == 1
+        parsed = datetime.strptime(subdirs[0].name, "%Y-%m-%d_%H-%M-%S")
+        assert parsed is not None
+
+    def test_creates_log_file(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        self._mock_all(monkeypatch)
+
+        main(["fake.bson", "fake.json"])
+
+        c_dir = tmp_path / "C"
+        subdirs = list(c_dir.iterdir())
+        assert len(subdirs) == 1
+        log_file = subdirs[0] / "logs.log"
+        assert log_file.exists()
+
+    def test_summary_stats_printed(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+
+        bson_docs = self._fake_bson_docs() * 5
+        verso_records = [
+            {"asset_id": str(i), "doi": f"10.1/{i}", "title": f"T{i}"} for i in range(7)
+        ]
+        matches = [
+            {
+                "asset_id": str(i),
+                "verso_doi": f"10.1/{i}",
+                "verso_title": f"T{i}",
+                "abstract": f"A{i}",
+                "abstract_source": "s2",
+                "abstract_external_id": "",
+                "match_method": "doi",
+                "match_score": 100.0,
+            }
+            for i in range(3)
+        ] + [
+            {
+                "asset_id": str(i),
+                "verso_doi": "",
+                "verso_title": f"T{i}",
+                "abstract": f"A{i}",
+                "abstract_source": "s2",
+                "abstract_external_id": "",
+                "match_method": "title",
+                "match_score": 92.0,
+            }
+            for i in range(3, 5)
+        ]
+
+        monkeypatch.setattr(
+            "import_abstracts.parse_bson_abstracts", lambda p: bson_docs
+        )
+        monkeypatch.setattr(
+            "import_abstracts.load_verso_records", lambda p: verso_records
+        )
+        monkeypatch.setattr("import_abstracts.match_records", lambda *a: matches)
+        monkeypatch.setattr("import_abstracts.write_import_csv", lambda *a: None)
+
+        main(["fake.bson", "fake.json"])
+
+        captured = capsys.readouterr().out
+        assert "Total BSON docs with abstracts: 5" in captured
+        assert "Total VERSO records: 7" in captured
+        assert "DOI: 3" in captured
+        assert "title: 2" in captured
+        assert "Unmatched: 2" in captured
