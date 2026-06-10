@@ -7,11 +7,14 @@ import pytest
 
 from unittest.mock import patch
 
+import pandas as pd
+
 from import_abstracts import (
     build_doi_index,
     load_verso_records,
     match_records,
     parse_bson_abstracts,
+    write_import_csv,
 )
 
 
@@ -505,3 +508,79 @@ class TestMatchRecords:
             "match_score",
         }
         assert set(result[0].keys()) == expected_keys
+
+
+class TestWriteImportCsv:
+    """Tests for write_import_csv()."""
+
+    COLUMNS = [
+        "asset_id",
+        "verso_doi",
+        "verso_title",
+        "abstract",
+        "abstract_source",
+        "abstract_external_id",
+        "match_method",
+        "match_score",
+    ]
+
+    @staticmethod
+    def _make_match(**overrides):
+        """Return a match dict with sensible defaults."""
+        defaults = {
+            "asset_id": "1",
+            "verso_doi": "10.1/a",
+            "verso_title": "Title A",
+            "abstract": "Some abstract text",
+            "abstract_source": "s2",
+            "abstract_external_id": "ext1",
+            "match_method": "doi",
+            "match_score": 100.0,
+        }
+        defaults.update(overrides)
+        return defaults
+
+    # 1. Creates CSV at path
+    def test_creates_csv_at_path(self, tmp_path):
+        matches = [self._make_match()]
+        path = str(tmp_path / "output.csv")
+        write_import_csv(matches, path)
+        df = pd.read_csv(path)
+        assert len(df) == 1
+        assert str(df.iloc[0]["asset_id"]) == "1"
+        assert df.iloc[0]["abstract"] == "Some abstract text"
+
+    # 2. Has exactly the 8 expected columns in order
+    def test_csv_has_expected_columns(self, tmp_path):
+        matches = [self._make_match()]
+        path = str(tmp_path / "output.csv")
+        write_import_csv(matches, path)
+        df = pd.read_csv(path)
+        assert list(df.columns) == self.COLUMNS
+
+    # 3. Empty matches list creates CSV with header row only
+    def test_empty_matches_header_only(self, tmp_path):
+        path = str(tmp_path / "empty.csv")
+        write_import_csv([], path)
+        df = pd.read_csv(path)
+        assert len(df) == 0
+        assert list(df.columns) == self.COLUMNS
+
+    # 4. Abstract with commas and newlines properly escaped
+    def test_commas_and_newlines_escaped(self, tmp_path):
+        matches = [self._make_match(abstract="has, commas\nand newlines")]
+        path = str(tmp_path / "special.csv")
+        write_import_csv(matches, path)
+        df = pd.read_csv(path)
+        assert df.iloc[0]["abstract"] == "has, commas\nand newlines"
+
+    # 5. None values written as empty string, not literal "None"
+    def test_none_values_become_empty_string(self, tmp_path):
+        matches = [self._make_match(abstract_external_id=None, verso_doi=None)]
+        path = str(tmp_path / "nones.csv")
+        write_import_csv(matches, path)
+        raw = (tmp_path / "nones.csv").read_text()
+        assert "None" not in raw
+        df = pd.read_csv(path, keep_default_na=False)
+        assert df.iloc[0]["abstract_external_id"] == ""
+        assert df.iloc[0]["verso_doi"] == ""

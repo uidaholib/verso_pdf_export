@@ -5,6 +5,7 @@ import logging
 import os
 
 import bson
+import pandas as pd
 from bson.errors import InvalidBSON
 from tqdm import tqdm
 
@@ -184,3 +185,33 @@ def match_records(
             )
 
     return matches
+
+
+def write_import_csv(matches: list[dict], path: str) -> None:
+    """Write match results to CSV so they can be reviewed or fed to VERSO import.
+
+    None values are replaced with empty strings to avoid literal 'None' text
+    in the output.  Column order is fixed for downstream tooling consistency.
+    """
+    rows = []
+    for m in matches:
+        row = dict(m)
+        for key, value in row.items():
+            if value is None:
+                row[key] = ""
+        rows.append(row)
+
+    df = pd.DataFrame(
+        rows,
+        columns=[
+            "asset_id",
+            "verso_doi",
+            "verso_title",
+            "abstract",
+            "abstract_source",
+            "abstract_external_id",
+            "match_method",
+            "match_score",
+        ],
+    )
+    df.to_csv(path, index=False, encoding="utf-8")
