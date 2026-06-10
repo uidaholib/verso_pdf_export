@@ -592,23 +592,33 @@ class TestWriteImportCsv:
 class TestParseArgs:
     """Tests for parse_args()."""
 
-    def test_positional_args_and_default_threshold(self):
-        args = parse_args(["data.bson", "meta.json"])
-        assert args.bson_path == "data.bson"
-        assert args.metadata_path == "meta.json"
-        assert args.threshold == 90
-
-    def test_missing_metadata_path_raises_system_exit(self):
-        with pytest.raises(SystemExit):
-            parse_args(["data.bson"])
-
     def test_no_args_raises_system_exit(self):
         with pytest.raises(SystemExit):
             parse_args([])
 
+    def test_flags_and_default_threshold(self):
+        args = parse_args(["--bson", "f.bson", "--metadata", "m.json"])
+        assert args.bson == "f.bson"
+        assert args.metadata == "m.json"
+        assert args.threshold == 90
+
     def test_custom_threshold(self):
-        args = parse_args(["a.bson", "b.json", "--threshold", "85"])
+        args = parse_args(
+            ["--bson", "f.bson", "--metadata", "m.json", "--threshold", "85"]
+        )
         assert args.threshold == 85
+
+    def test_missing_bson_raises_system_exit(self):
+        with pytest.raises(SystemExit):
+            parse_args(["--metadata", "m.json"])
+
+    def test_missing_metadata_raises_system_exit(self):
+        with pytest.raises(SystemExit):
+            parse_args(["--bson", "f.bson"])
+
+    def test_positional_args_rejected(self):
+        with pytest.raises(SystemExit):
+            parse_args(["f.bson", "m.json"])
 
 
 @pytest.fixture
@@ -687,7 +697,7 @@ class TestMain:
         call_order = []
         self._mock_all(monkeypatch, call_order)
 
-        main(["fake.bson", "fake.json"])
+        main(["--bson", "fake.bson", "--metadata", "fake.json"])
 
         assert call_order == [
             "parse_bson_abstracts",
@@ -708,7 +718,7 @@ class TestMain:
         monkeypatch.setattr("import_abstracts.write_import_csv", lambda *a: None)
 
         with pytest.raises(SystemExit, match="nonexistent.bson"):
-            main(["nonexistent.bson", "fake.json"])
+            main(["--bson", "nonexistent.bson", "--metadata", "fake.json"])
 
     def test_bad_metadata_path_exits(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -718,13 +728,13 @@ class TestMain:
         # Don't mock load_verso_records — let it raise on missing file
 
         with pytest.raises(SystemExit, match="nonexistent.json"):
-            main(["fake.bson", "nonexistent.json"])
+            main(["--bson", "fake.bson", "--metadata", "nonexistent.json"])
 
     def test_creates_timestamped_directory(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         self._mock_all(monkeypatch)
 
-        main(["fake.bson", "fake.json"])
+        main(["--bson", "fake.bson", "--metadata", "fake.json"])
 
         c_dir = tmp_path / "C"
         assert c_dir.exists()
@@ -737,7 +747,7 @@ class TestMain:
         monkeypatch.chdir(tmp_path)
         self._mock_all(monkeypatch)
 
-        main(["fake.bson", "fake.json"])
+        main(["--bson", "fake.bson", "--metadata", "fake.json"])
 
         c_dir = tmp_path / "C"
         subdirs = list(c_dir.iterdir())
@@ -787,7 +797,7 @@ class TestMain:
         monkeypatch.setattr("import_abstracts.match_records", lambda *a: matches)
         monkeypatch.setattr("import_abstracts.write_import_csv", lambda *a: None)
 
-        main(["fake.bson", "fake.json"])
+        main(["--bson", "fake.bson", "--metadata", "fake.json"])
 
         captured = capsys.readouterr().out
         assert "Total BSON docs with abstracts: 5" in captured

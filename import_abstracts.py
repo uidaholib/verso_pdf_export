@@ -228,11 +228,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Match pre-harvested abstracts from a Universo BSON export to VERSO metadata records."
     )
     parser.add_argument(
-        "bson_path",
+        "--bson",
+        required=True,
         help="Path to multi-document BSON export file",
     )
     parser.add_argument(
-        "metadata_path",
+        "--metadata",
+        required=True,
         help="Path to asset_metadata.json file",
     )
     parser.add_argument(
@@ -267,14 +269,14 @@ def main(argv: list[str] | None = None) -> None:
     logging.getLogger().addHandler(console_handler)
 
     try:
-        bson_docs = parse_bson_abstracts(args.bson_path)
+        bson_docs = parse_bson_abstracts(args.bson)
     except ValueError as exc:
         sys.exit(str(exc))
 
     logger.info("Parsed %d BSON docs with abstracts", len(bson_docs))
 
     try:
-        verso_records = load_verso_records(args.metadata_path)
+        verso_records = load_verso_records(args.metadata)
     except ValueError as exc:
         sys.exit(str(exc))
 
