@@ -47,3 +47,24 @@ def parse_bson_abstracts(filepath: str) -> list[dict]:
         logger.warning("BSON file contains 0 documents: %s", filepath)
 
     return results
+
+
+def build_doi_index(docs: list[dict]) -> dict[str, dict]:
+    """Build a DOI-keyed lookup dict from parsed abstract documents.
+
+    Keys are normalized (lowercased, stripped) so that case/whitespace
+    differences don't prevent matches against VERSO records.
+    """
+    index: dict[str, dict] = {}
+    for doc in docs:
+        raw_doi = doc.get("identifier_doi", "")
+        normalized = raw_doi.strip().lower()
+        if not normalized:
+            continue
+        if normalized in index:
+            logger.warning(
+                "Duplicate DOI after normalization: %r (overwrites previous entry)",
+                normalized,
+            )
+        index[normalized] = doc
+    return index

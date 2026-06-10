@@ -1,10 +1,10 @@
-"""Tests for parse_bson_abstracts() — Phase 3, Step 1."""
+"""Tests for import_abstracts — Phase 3."""
 
 import logging
 
 import pytest
 
-from import_abstracts import parse_bson_abstracts
+from import_abstracts import build_doi_index, parse_bson_abstracts
 
 
 class TestParseBsonAbstracts:
@@ -172,3 +172,61 @@ class TestParseBsonAbstracts:
         path.write_bytes(b"\x05\x00\x00\x00garbage bytes here")
         with pytest.raises(ValueError, match="corrupt|decode|invalid|BSON"):
             parse_bson_abstracts(str(path))
+
+
+def _make_doc(doi="10.1/a", abstract="Text", abstract_source="s2"):
+    """Helper to build a minimal doc dict for build_doi_index tests."""
+    return {
+        "abstract": abstract,
+        "abstract_source": abstract_source,
+        "abstract_external_id": "",
+        "identifier_doi": doi,
+        "title": "T",
+    }
+
+
+class TestBuildDoiIndex:
+    """Tests for build_doi_index()."""
+
+    # 1. 3 docs with distinct DOIs -> dict with 3 entries, keys lowercase
+    def test_three_distinct_dois(self):
+        docs = [_make_doc("10.1/aaa"), _make_doc("10.2/bbb"), _make_doc("10.3/ccc")]
+        index = build_doi_index(docs)
+        assert len(index) == 3
+        assert all(k == k.lower() for k in index)
+
+    # 2. Case-insensitive lookup
+    def test_case_insensitive_lookup(self):
+        docs = [_make_doc("10.1/ABC")]
+        index = build_doi_index(docs)
+        assert "10.1/abc" in index
+
+    # 3. Leading/trailing whitespace stripped
+    def test_whitespace_stripped(self):
+        docs = [_make_doc("  10.1/x  ")]
+        index = build_doi_index(docs)
+        assert "10.1/x" in index
+        assert len(index) == 1
+
+    # 4. Empty DOI not included
+    def test_empty_doi_excluded(self):
+        docs = [_make_doc("10.1/a"), _make_doc("")]
+        index = build_doi_index(docs)
+        assert len(index) == 1
+        assert "10.1/a" in index
+
+    # 5. Duplicate DOIs (different case) -> last one wins, logs warning
+    def test_duplicate_doi_last_wins_and_warns(self, caplog):
+        doc_upper = _make_doc("10.1/DUP")
+        doc_upper["title"] = "First"
+        doc_lower = _make_doc("10.1/dup")
+        doc_lower["title"] = "Second"
+        with caplog.at_level(logging.WARNING):
+            index = build_doi_index([doc_upper, doc_lower])
+        assert len(index) == 1
+        assert index["10.1/dup"]["title"] == "Second"
+        assert "duplicate" in caplog.text.lower()
+
+    # 6. Empty list returns empty dict
+    def test_empty_list_returns_empty_dict(self):
+        assert build_doi_index([]) == {}
