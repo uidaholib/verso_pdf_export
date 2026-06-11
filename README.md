@@ -150,6 +150,8 @@ Matches pre-harvested abstracts from a Universo BSON export to VERSO metadata re
 
 **Output:** `C/{timestamp}/imported_abstracts.csv`
 
+**TODO:** The Universo BSON export contains duplicate DOIs (likely multiple records sharing the same DOI, e.g. preprint and published version, or records merged from different source collections). The current behavior is "last one wins" — when duplicates exist, the last BSON document with that DOI overwrites earlier ones in the index. Investigate whether this causes incorrect abstract matches and whether deduplication should prefer a specific record (e.g. the one with the longest abstract, or the most recent).
+
 ## Abstract Harvesting
 
 The `feature/abstract-harvesting` branch adds the ability to enrich VERSO metadata records with abstracts from OpenAlex and Semantic Scholar. There are three ways to use it:

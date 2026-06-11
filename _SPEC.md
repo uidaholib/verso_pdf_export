@@ -394,7 +394,7 @@ Existing `VERSO_API_KEY` unchanged. All loaded via `python-dotenv` (`load_dotenv
 ## Exit checklist
 
 - [ ] `pytest` passes with zero failures
-- [ ] `pytest --co` finds tests in all 6 test files
+- [ ] `pytest --co` finds tests in all 7 test files
 - [ ] `python -c "from providers.harvester import try_providers"` succeeds
 - [ ] `abstract_script.py` runs in DEBUG_MODE without error on real metadata
 - [ ] `import_abstracts.py` runs without error on real BSON export
