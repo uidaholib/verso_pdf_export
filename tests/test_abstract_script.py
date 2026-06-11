@@ -9,14 +9,13 @@ import pytest
 import pandas as pd
 
 from abstract_script import (
-    extract_identifiers,
     load_metadata,
     main,
     merge_enrichment_results,
     parse_args,
-    should_skip,
     write_results_csv,
 )
+from providers.enrich import extract_identifiers, should_skip
 
 
 class TestLoadMetadata:
