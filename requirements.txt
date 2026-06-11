@@ -4,6 +4,8 @@ python-dotenv>=1.0.0
 tqdm>=4.65.0
 openpyxl>=3.0.0
 rapidfuzz>=3.0.0
+# pymongo provides bson.decode_file_iter for mongodump files.
+# Do NOT install the standalone 'bson' package — it conflicts with pymongo's bson namespace.
 pymongo>=4.0.0
 pytest>=7.0.0
 responses>=0.23.0

@@ -49,13 +49,14 @@ verso_pdf_export/
   md_script.py               (modified: same)
   abstract_script.py         (new: standalone enrichment)
   import_abstracts.py        (new: one-time BSON import)
-  requirements.txt           (modified: +rapidfuzz, +pymongo, +pytest, +responses)
+  requirements.txt           (modified: +rapidfuzz, +pymongo, +pytest, +responses, +pytest-cov)
   setup.md                   (modified: document new .env vars)
   providers/
     __init__.py
     openalex.py              (OA client + reconstruct_abstract)
     s2.py                    (S2 client)
     harvester.py             (cascade orchestrator + title_matches)
+    enrich.py                (shared enrichment helpers)
   tests/
     __init__.py
     conftest.py              (shared fixtures)
@@ -64,6 +65,7 @@ verso_pdf_export/
     test_harvester.py
     test_abstract_script.py
     test_import_abstracts.py
+    test_enrich.py
     test_integration.py
 ```
 
@@ -340,22 +342,31 @@ FUZZY_THRESHOLD = 90
 
 ---
 
-## Phase 5: Documentation
+## Phase 5: CLI Consolidation & Documentation
 
-### Step 5.1 — Update `setup.md`
+### Step 5.0 — Standardize `abstract_script.py` CLI
 
-Add to the `.env` setup section:
-```
-# For abstract harvesting (abstract_script.py and ENRICH_ABSTRACTS mode)
-OPENALEX_API_KEY=your-key-here          # recommended, free at openalex.org (unauthenticated still works but shares a rate-limit pool)
-SEMANTIC_SCHOLAR_API_KEY=               # optional, gives guaranteed individual rate allocation
-```
+Replaced positional `metadata_path` argument with `--metadata` flag. Added `--subset-size` and `--fuzzy-threshold` optional flags with defaults matching other scripts.
 
-Add run instructions for `abstract_script.py` and `import_abstracts.py`.
+### Step 5.1 — Standardize `import_abstracts.py` CLI
 
-### Step 5.2 — Update `requirements.txt` comment
+Replaced positional arguments with `--bson` and `--metadata` flags. Consistent with the flag-based pattern used across the project.
 
-Add note about pymongo/bson namespace conflict.
+### Step 5.2 — Consolidate `abstract_script.py`
+
+Removed `enrich_records()` and `_make_result()`. `main()` now calls `enrich_final_output()` from `providers/enrich.py`. Added `merge_enrichment_results()` helper.
+
+### Step 5.3 — Rewrite `README.md`
+
+Rewrote `README.md` with full project documentation and CLI reference.
+
+### Step 5.4 — Update `setup.md`
+
+Added env var documentation (`OPENALEX_API_KEY`, `S2_API_KEY`) and run instructions for `abstract_script.py`, `import_abstracts.py`, and the `--enrich-abstracts` flag.
+
+### Step 5.5 — Update `requirements.txt` comment
+
+Added pymongo/bson namespace conflict warning above `pymongo>=4.0.0` in `requirements.txt`.
 
 ---
 
@@ -364,7 +375,7 @@ Add note about pymongo/bson namespace conflict.
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
 | `OPENALEX_API_KEY` | Recommended | `""` | API key for OpenAlex (free at openalex.org). Unauthenticated requests work but share a 10k-credit/day pool; a key guarantees your own allocation. |
-| `SEMANTIC_SCHOLAR_API_KEY` | No | `""` | S2 API key (gives guaranteed 1 req/s individual allocation vs shared unauthenticated pool) |
+| `S2_API_KEY` | No | `""` | S2 API key (gives guaranteed 1 req/s individual allocation vs shared unauthenticated pool) |
 
 Existing `VERSO_API_KEY` unchanged. All loaded via `python-dotenv` (`load_dotenv()` at script startup).
 
