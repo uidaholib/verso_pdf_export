@@ -1,0 +1,22 @@
+# Environment
+.env
+
+# Python virtual environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Output folders
+A/
+B/
+C/
+
+# Input data
+*.csv
+
+# macOS
+.DS_Store
