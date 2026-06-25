@@ -124,58 +124,11 @@ def _parse_rows_from_xml(xml_text: str) -> tuple[list[dict], str, bool]:
     return rows, resumption_token, is_finished
 
 
-def fetch_and_rebuild_csvs() -> None:
+def _split_and_save_csvs(df_all: pd.DataFrame) -> None:
     """
-    Pull the assetsWithPDFs report from Alma Analytics via the API gateway,
-    handling pagination via ResumptionToken.  Save it as assetsWithPDFs.csv,
-    then split into the ETD and non-ETD CSVs (overwriting previous versions).
+    Split df_all on Asset Type and write all three source CSVs.
+    Shared by both the API fetch path and the manual-CSV fallback path.
     """
-    API_KEY = os.getenv("VERSO_API_KEY")
-    if not API_KEY:
-        raise EnvironmentError("VERSO_API_KEY not found in environment / .env file.")
-
-    print("Fetching latest assetsWithPDFs report from Alma Analytics …")
-    logger.info("Fetching analytics report: %s", ANALYTICS_PATH)
-
-    all_rows = []
-    resumption_token = None
-
-    while True:
-        params = {
-            "apikey": API_KEY,
-            "path":   ANALYTICS_PATH,
-        }
-        if resumption_token:
-            params["token"] = resumption_token
-
-        response = requests.get(
-            ANALYTICS_BASE,
-            params=params,
-            headers={"Accept": "application/xml"},
-            timeout=120,
-        )
-        response.raise_for_status()
-
-        rows, resumption_token, is_finished = _parse_rows_from_xml(response.text)
-        all_rows.extend(rows)
-        print(f"  … fetched {len(all_rows):,} rows so far", end="\r")
-
-        if is_finished:
-            break
-        if not resumption_token:
-            # Safety: no token and not finished means something unexpected
-            logger.warning("No ResumptionToken received but IsFinished was not true – stopping.")
-            break
-
-    print(f"  Fetched {len(all_rows):,} total rows from Analytics.          ")
-
-    if not all_rows:
-        raise ValueError(
-            "No data rows found in the Analytics response. "
-            "Check the API key, report path, and that the report has results."
-        )
-
-    df_all = pd.DataFrame(all_rows)
     if "Asset Id" in df_all.columns:
         df_all["Asset Id"] = pd.to_numeric(df_all["Asset Id"], errors="coerce")
 
@@ -183,7 +136,6 @@ def fetch_and_rebuild_csvs() -> None:
     print(f"  Saved {len(df_all):,} rows → {CSV_ALL}")
     logger.info("Saved %d rows to %s", len(df_all), CSV_ALL)
 
-    # Split on Asset Type
     mask_etd    = df_all["Asset Type"].isin(ETD_TYPES)
     df_etd      = df_all[mask_etd].reset_index(drop=True)
     df_sans_etd = df_all[~mask_etd].reset_index(drop=True)
@@ -195,6 +147,100 @@ def fetch_and_rebuild_csvs() -> None:
     df_sans_etd.to_csv(CSV_SANS_ETD, index=False, encoding="utf-8")
     print(f"  Saved {len(df_sans_etd):,} non-ETD rows → {CSV_SANS_ETD}\n")
     logger.info("Saved %d non-ETD rows to %s", len(df_sans_etd), CSV_SANS_ETD)
+
+
+def fetch_and_rebuild_csvs() -> None:
+    """
+    Attempt to pull the assetsWithPDFs report from Alma Analytics via the API
+    gateway, handling pagination via ResumptionToken.
+
+    If the API fetch fails for any reason (missing key, auth error, network
+    issue, unexpected response format), the script falls back to reading
+    assetsWithPDFs.csv from the repo root and splitting it into the ETD and
+    non-ETD CSVs from there.  A warning is printed so the operator knows
+    which path was taken.
+    """
+    API_KEY = os.getenv("ANALYTICS_API_KEY")
+
+    # ------------------------------------------------------------------
+    # Attempt: fetch from Analytics API
+    # ------------------------------------------------------------------
+    if API_KEY:
+        try:
+            print("Fetching latest assetsWithPDFs report from Alma Analytics …")
+            logger.info("Fetching analytics report: %s", ANALYTICS_PATH)
+
+            all_rows = []
+            resumption_token = None
+
+            while True:
+                params = {"apikey": API_KEY, "path": ANALYTICS_PATH}
+                if resumption_token:
+                    params["token"] = resumption_token
+
+                response = requests.get(
+                    ANALYTICS_BASE,
+                    params=params,
+                    headers={"Accept": "application/xml"},
+                    timeout=120,
+                )
+                response.raise_for_status()
+
+                # Treat an HTML response (login page) as a failure
+                content_type = response.headers.get("Content-Type", "")
+                if "text/html" in content_type:
+                    raise ValueError(
+                        f"Analytics endpoint returned HTML (login page) instead of XML. "
+                        f"Check that ANALYTICS_API_KEY is authorised for this endpoint."
+                    )
+
+                rows, resumption_token, is_finished = _parse_rows_from_xml(response.text)
+                all_rows.extend(rows)
+                print(f"  … fetched {len(all_rows):,} rows so far", end="\r")
+
+                if is_finished:
+                    break
+                if not resumption_token:
+                    logger.warning(
+                        "No ResumptionToken received but IsFinished was not true – stopping."
+                    )
+                    break
+
+            print(f"  Fetched {len(all_rows):,} total rows from Analytics.          ")
+
+            if not all_rows:
+                raise ValueError(
+                    "Analytics response contained no data rows. "
+                    "Check the API key, report path, and that the report has results."
+                )
+
+            _split_and_save_csvs(pd.DataFrame(all_rows))
+            return  # success – skip fallback
+
+        except Exception as e:
+            print(f"\n  ⚠ Analytics API fetch failed: {e}")
+            print("  Falling back to manual assetsWithPDFs.csv …\n")
+            logger.warning("Analytics API fetch failed (%s) – falling back to manual CSV.", e)
+
+    else:
+        print("  ⚠ ANALYTICS_API_KEY not set – falling back to manual assetsWithPDFs.csv …\n")
+        logger.warning("ANALYTICS_API_KEY not set – falling back to manual CSV.")
+
+    # ------------------------------------------------------------------
+    # Fallback: read assetsWithPDFs.csv from the repo root
+    # ------------------------------------------------------------------
+    if not os.path.exists(CSV_ALL):
+        raise FileNotFoundError(
+            f"Analytics fetch failed and no fallback CSV found at '{CSV_ALL}'.\n"
+            f"Export the report manually from Analytics → Shared Folders / University of Idaho / "
+            f"Reports / normTesting / assetsWithPDFs and save it as '{CSV_ALL}' in the repo root."
+        )
+
+    print(f"  Reading {CSV_ALL} from repo root …")
+    logger.info("Loading fallback CSV: %s", CSV_ALL)
+    df_all = pd.read_csv(CSV_ALL)
+    print(f"  Loaded {len(df_all):,} rows from {CSV_ALL}")
+    _split_and_save_csvs(df_all)
 
 
 # ===========================================================================
@@ -540,8 +586,9 @@ def print_usage() -> None:
         "  python script.py full      – download ALL assets (PDFs + metadata)\n"
         "  python script.py ETD       – download ETD assets only\n"
         "  python script.py sansETD   – download non-ETD assets only\n"
-        "\nIn all modes the script first refreshes the three source CSVs\n"
-        "by fetching the latest report from Alma Analytics.\n"
+        "\nIn all modes the script attempts to refresh the three source CSVs\n"
+        "by fetching the latest report from Alma Analytics (ANALYTICS_API_KEY).\n"
+        "If that fails, it falls back to assetsWithPDFs.csv in the repo root.\n"
     )
 
 
