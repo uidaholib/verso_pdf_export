@@ -9,9 +9,17 @@ pip install -r requirements.txt
 
 mkdir A B C
 
-**to generate full PDF files and metadata**
+**generate full PDF files and metadata**
 
-python script.py
+python script.py full
+
+**generate only ETD PDF files and metadata**
+
+python script.py ETD
+
+**generate everything but ETD PDF files and metadata**
+
+python script.py sansETD
 
 **to only generate metadata**
 
@@ -19,6 +27,10 @@ python md_script.py
 
 **to keep device from sleeping while running the tasks**
 
-caffeinate python script.py
+caffeinate -di python script.py full
 
-caffeinate python md_script.py
+caffeinate -di python script.py ETD
+
+caffeinate -di python script.py sansETD
+
+caffeinate -di python md_script.py
