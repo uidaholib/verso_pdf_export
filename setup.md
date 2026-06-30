@@ -9,6 +9,10 @@ pip install -r requirements.txt
 
 mkdir A B C
 
+**test to make sure API key is still valid**
+
+python debug.py
+
 **generate full PDF files and metadata**
 
 python script.py full
