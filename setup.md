@@ -9,6 +9,16 @@ pip install -r requirements.txt
 
 mkdir A B C
 
+**Generate New assetsWITHPDFs Report**
+
+https://analytics12-na.esploro.exlibrisgroup.com/analytics/saw.dll?Answers&path=%2Fshared%2FUniversity%20of%20Idaho%2FReports%2FnormTesting%2FassetsWithPDFs
+
+- Drop in repo root
+
+- Rename the previous report to assetsWithPDFs_previous.csv
+
+- The script will contrast the newest report with the last and only export files and metadata for the new items. To generate the full database, remove the _previous version from the root
+
 **test to make sure API key is still valid**
 
 python debug.py

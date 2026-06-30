@@ -23,6 +23,14 @@ CSV_ALL       = "assetsWithPDFs.csv"
 CSV_ETD       = "assetsWithPDFs_just_ETDs_metadata.csv"
 CSV_SANS_ETD  = "assetsWithPDFs_without_ETD_metadata.csv"
 
+# CSV of the FULL asset list from the previous run of the tool. If present,
+# any Asset Id already listed here is treated as "already processed" and is
+# skipped on this run (no metadata fetch, no PDF download). The operator is
+# responsible for placing this file in the repo root (e.g. by renaming the
+# previous run's assetsWithPDFs.csv) before re-running the tool. If it is
+# not present, every asset in this run's CSVs is processed/downloaded.
+CSV_ALL_PREVIOUS = "assetsWithPDFs_previous.csv"
+
 # Asset types treated as ETDs
 ETD_TYPES = {"ETD-Doctoral", "ETD-Graduate"}
 
@@ -128,6 +136,12 @@ def _split_and_save_csvs(df_all: pd.DataFrame) -> None:
     """
     Split df_all on Asset Type and write all three source CSVs.
     Shared by both the API fetch path and the manual-CSV fallback path.
+
+    NOTE: These CSVs always reflect the FULL current state of the report
+    (no previous-run filtering applied here). Filtering against
+    assetsWithPDFs_previous.csv happens later, in load_data(), so that the
+    on-disk assetsWithPDFs*.csv files remain a complete, accurate snapshot
+    that can itself become next run's "_previous" file.
     """
     if "Asset Id" in df_all.columns:
         df_all["Asset Id"] = pd.to_numeric(df_all["Asset Id"], errors="coerce")
@@ -247,10 +261,38 @@ def fetch_and_rebuild_csvs() -> None:
 # STEP 1 – Load the appropriate CSV for this run mode
 # ===========================================================================
 
+def _load_previous_run_asset_ids() -> set:
+    """
+    Read assetsWithPDFs_previous.csv (the full assetsWithPDFs export saved
+    from the prior run of the tool) and return the set of Asset Id values
+    it contains.
+
+    Returns an empty set if the file does not exist, which signals "no
+    previous run on record" — in that case every caller treats this as
+    "process everything" rather than filtering anything out.
+    """
+    if not os.path.exists(CSV_ALL_PREVIOUS):
+        return set()
+
+    try:
+        prev_df = pd.read_csv(CSV_ALL_PREVIOUS, usecols=["Asset Id"])
+        prev_df["Asset Id"] = pd.to_numeric(prev_df["Asset Id"], errors="coerce")
+        return set(prev_df["Asset Id"].dropna().astype(int).unique())
+    except Exception as e:
+        logger.warning(
+            "Could not read previous-run CSV %s (%s) – treating as no previous run.",
+            CSV_ALL_PREVIOUS, e,
+        )
+        return set()
+
+
 def load_data(mode: str) -> pd.DataFrame:
     """
-    Load asset IDs from the CSV that corresponds to the run mode and
-    attach the Esploro API URL to each row.
+    Load asset IDs from the CSV that corresponds to the run mode, attach the
+    Esploro API URL to each row, and filter out any Asset Id that already
+    appears in assetsWithPDFs_previous.csv (i.e. assets already processed on
+    a prior run). If assetsWithPDFs_previous.csv does not exist, no rows are
+    filtered out and every asset in the source CSV is processed.
 
     mode values: 'full' | 'ETD' | 'sansETD'
     """
@@ -271,6 +313,37 @@ def load_data(mode: str) -> pd.DataFrame:
     print(f"Loaded {len(df):,} records from '{csv_file}'.")
     logger.info("Loaded %d records from %s", len(df), csv_file)
 
+    df["Asset Id"] = pd.to_numeric(df["Asset Id"], errors="coerce")
+
+    # ------------------------------------------------------------------
+    # Cross-reference against the previous run's full asset list. Anything
+    # already present there is considered already downloaded and is
+    # skipped this run (no metadata fetch, no PDF download).
+    # ------------------------------------------------------------------
+    previous_ids = _load_previous_run_asset_ids()
+    if previous_ids:
+        before_count = len(df)
+        df = df[~df["Asset Id"].isin(previous_ids)].reset_index(drop=True)
+        skipped_count = before_count - len(df)
+        print(
+            f"  Found '{CSV_ALL_PREVIOUS}' ({len(previous_ids):,} previously processed "
+            f"asset(s)) — skipping {skipped_count:,} already-downloaded record(s); "
+            f"{len(df):,} new record(s) will be processed."
+        )
+        logger.info(
+            "Filtered '%s' against %s: skipped %d already-processed, %d new records remain.",
+            csv_file, CSV_ALL_PREVIOUS, skipped_count, len(df),
+        )
+    else:
+        print(
+            f"  No '{CSV_ALL_PREVIOUS}' found — processing all {len(df):,} record(s) "
+            f"(treating this as the first run)."
+        )
+        logger.info(
+            "No previous-run CSV (%s) found; processing all %d records from %s.",
+            CSV_ALL_PREVIOUS, len(df), csv_file,
+        )
+
     api_base = "https://api-na.hosted.exlibrisgroup.com/esploro/v1/assets/"
     df["api_url"] = df["Asset Id"].apply(
         lambda x: f"{api_base}{int(x)}" if pd.notna(x) else None
@@ -286,6 +359,9 @@ def make_api_calls(df: pd.DataFrame) -> dict:
     """
     Request each asset's metadata as JSON from the Esploro API and
     compile into a single dict (also saved as JSON).
+
+    `df` is expected to already be filtered down to only the assets that
+    should be processed this run (see load_data()).
     """
     API_KEY = os.getenv("VERSO_API_KEY")
     all_records = []
@@ -356,6 +432,10 @@ def make_api_calls(df: pd.DataFrame) -> dict:
 def download_asset_files(final_output: dict) -> list:
     """
     Download PDFs listed in fileDownloadUrl into folder 'A'.
+
+    `final_output` only contains records for assets that survived the
+    previous-run filtering in load_data(), so this naturally only downloads
+    files for assets not already present in assetsWithPDFs_previous.csv.
     """
     logger.info("Starting download_asset_files")
 
@@ -536,6 +616,13 @@ def generate_metadata_csv(file_tasks: list, final_output: dict, mode: str) -> No
 
     The '_new' file helps digital preservation staff identify items not yet
     archived from prior export initiatives.
+
+    Note: because download_asset_files() now only operates on assets that
+    survived the assetsWithPDFs_previous.csv filtering in load_data(),
+    pdf_metadata.csv for this run will already only contain newly
+    downloaded assets in the normal case. This '_new' comparison remains
+    as an additional safety net (e.g. for a re-run without an updated
+    assetsWithPDFs_previous.csv).
     """
     logger.info("Generating metadata CSV in folder B (mode=%s)", mode)
     os.makedirs("B", exist_ok=True)
@@ -589,6 +676,11 @@ def print_usage() -> None:
         "\nIn all modes the script attempts to refresh the three source CSVs\n"
         "by fetching the latest report from Alma Analytics (ANALYTICS_API_KEY).\n"
         "If that fails, it falls back to assetsWithPDFs.csv in the repo root.\n"
+        "\nIf 'assetsWithPDFs_previous.csv' exists in the repo root (the full\n"
+        "assetsWithPDFs export saved from the prior run), any Asset Id already\n"
+        "listed there is skipped this run in all three modes — no metadata\n"
+        "fetch, no PDF download. If that file is absent, every asset is\n"
+        "processed, as on a first run.\n"
     )
 
 
@@ -605,10 +697,10 @@ if __name__ == "__main__":
     # 0. Refresh source CSVs from Analytics
     fetch_and_rebuild_csvs()
 
-    # 1. Load the appropriate slice
+    # 1. Load the appropriate slice, filtered against assetsWithPDFs_previous.csv
     df = load_data(mode)
 
-    # 2. Fetch asset metadata
+    # 2. Fetch asset metadata (only for assets not already processed previously)
     final_output = make_api_calls(df)
 
     # 3. Download PDFs
