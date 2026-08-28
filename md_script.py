@@ -10,27 +10,6 @@ from dotenv import load_dotenv
 from tqdm import tqdm
 import logging
 
-# ===========================================================================
-# md_script.py
-#
-# Metadata-only variant of verso_pdf_export.py.
-#
-#   • Still fetches/refreshes the assetsWithPDFs source CSVs (root).
-#   • Still calls the Esploro API to pull full asset metadata.
-#   • Still writes asset_metadata.json + logs to folder C.
-#   • Still writes pdf_metadata.csv / pdf_metadata_new.csv to folder B.
-#   • Does NOT download any PDF binaries — folder A is never created or
-#     written to. File-level fields (filename, size, creation date, etc.)
-#     are still captured in the B metadata CSVs, just without fetching the
-#     file content itself.
-#   • Does NOT cross-reference assetsWithPDFs_previous.csv. Every asset in
-#     the relevant source CSV is processed every run, in full — there is no
-#     bandwidth cost to re-pulling metadata the way there is for PDFs, so no
-#     filtering is needed here.
-#
-# Run modes (same as script.py): full | ETD | sansETD
-# ===========================================================================
-
 # ---------------------------------------------------------------------------
 # CONFIGURATION
 # ---------------------------------------------------------------------------

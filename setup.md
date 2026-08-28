@@ -11,6 +11,12 @@ mkdir A B C
 
 **Generate New assetsWITHPDFs Report**
 
+First:
+
+https://alliance-uidaho-researchmanagement.esploro.exlibrisgroup.com/mng/login?auth=SAML
+
+Then:
+
 https://analytics12-na.esploro.exlibrisgroup.com/analytics/saw.dll?Answers&path=%2Fshared%2FUniversity%20of%20Idaho%2FReports%2FnormTesting%2FassetsWithPDFs
 
 - Drop in repo root
