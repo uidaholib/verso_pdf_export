@@ -21,7 +21,7 @@ https://analytics12-na.esploro.exlibrisgroup.com/analytics/saw.dll?Answers&path=
 
 - Drop in repo root
 
-- Rename the previous report to assetsWithPDFs_previous.csv
+- Preserve name if only exporting metadata. Rename the report to assetsWithPDFs_previous.csv if generating metadata and new assets
 
 - The script will contrast the newest report with the last and only export files and metadata for the new items. To generate the full database, remove the _previous version from the root
 
